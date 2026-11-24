@@ -61,6 +61,8 @@ export class Rig {
     this.target = new Map();   // 骨頭名稱 → 目標本地旋轉
     this.hipsOffset = V();      // 目標臀部位移（語意座標，公尺）
     this.hasUpperChest = !!this.node("upperChest");
+    this.lastSeen = {};        // 肢體最後一次被看清楚的時間（秒）
+    this.HOLD = 0.8;           // 看不清楚時，維持上一個姿勢多久再慢慢放鬆
     this._measureRest();
   }
 
@@ -179,17 +181,23 @@ export class Rig {
       for (const person of ["L", "R"]) {
         const av = sides[person];
         const iSh = person === "L" ? P.lSh : P.rSh, iEl = person === "L" ? P.lEl : P.rEl, iWr = person === "L" ? P.lWr : P.rWr;
-        const ok = vis(iEl) > 0.45 && vis(iWr) > 0.35;
+        const ok = vis(iEl) > 0.35 && vis(iWr) > 0.25;
         const pw2 = W[av + "Shoulder"];
+        const now = opts.idleT || 0;
         if (ok) {
+          this.lastSeen[av + "Arm"] = now;
           aimBone(av + "UpperArm", pw2, V().subVectors(cv(w[iEl]), cv(w[iSh])));
           aimBone(av + "LowerArm", W[av + "UpperArm"], V().subVectors(cv(w[iWr]), cv(w[iEl])));
+        } else if (now - (this.lastSeen[av + "Arm"] ?? -9) < this.HOLD) {
+          this._keep([av + "UpperArm", av + "LowerArm", av + "Hand"], pw2, W);   // 短暫被擋住：維持上一個姿勢
         } else {
           this._relaxArm(av, pw2, W, aimBone);
         }
         // 手掌
         const hand = frame.hands?.[person];
-        if (ok && hand && opts.useHands) {
+        const held = !ok && now - (this.lastSeen[av + "Arm"] ?? -9) < this.HOLD;
+        if (held) { /* 手掌、手指也維持 */ }
+        else if (ok && hand && opts.useHands) {
           this._solveHand(av, hand, mirror, W, setLocal, aimBone);
         } else if (ok) {
           const iIdx = person === "L" ? P.lIndex : P.rIndex, iPk = person === "L" ? P.lPinky : P.rPinky;
@@ -214,8 +222,12 @@ export class Rig {
         const av = sides[person];
         const iHip = person === "L" ? P.lHip : P.rHip, iKn = person === "L" ? P.lKnee : P.rKnee;
         const iAn = person === "L" ? P.lAnk : P.rAnk, iFt = person === "L" ? P.lFoot : P.rFoot;
-        const ok = opts.fullBody && vis(iKn) > 0.5 && vis(iAn) > 0.45;
-        if (ok) {
+        const ok = opts.fullBody && vis(iKn) > 0.4 && vis(iAn) > 0.35;
+        const nowL = opts.idleT || 0;
+        if (ok) this.lastSeen[av + "Leg"] = nowL;
+        if (!ok && opts.fullBody && nowL - (this.lastSeen[av + "Leg"] ?? -9) < this.HOLD) {
+          this._keep([av + "UpperLeg", av + "LowerLeg", av + "Foot"], hipsW, W);
+        } else if (ok) {
           aimBone(av + "UpperLeg", hipsW, V().subVectors(cv(w[iKn]), cv(w[iHip])));
           aimBone(av + "LowerLeg", W[av + "UpperLeg"], V().subVectors(cv(w[iAn]), cv(w[iKn])));
           if (vis(iFt) > 0.4) aimBone(av + "Foot", W[av + "LowerLeg"], V().subVectors(cv(w[iFt]), cv(w[iAn])));
@@ -260,6 +272,15 @@ export class Rig {
       const qRig = this.Mq.clone().multiply(qCam).multiply(this.Mq.clone().invert());
       const topW = W[this.hasUpperChest ? "upperChest" : "chest"] || Q();
       this._applyHead(topW.clone().invert().multiply(qRig), topW);
+    }
+  }
+
+  /** 不更新目標旋轉，只沿用上一次的值並算出世界旋轉（給子骨頭用） */
+  _keep(names, parentW, W) {
+    let pw = parentW;
+    for (const n of names) {
+      const t = this.target.get(n) || Q();
+      W[n] = pw.clone().multiply(t); pw = W[n];
     }
   }
 
