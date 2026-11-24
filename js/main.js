@@ -181,7 +181,7 @@ function syncUI() {
   $("optFace").checked = S.useFace; $("optHands").checked = S.useHands; $("optMirror").checked = S.mirror;
   $("optPip").checked = S.showPip; $("optSkel").checked = S.showSkel; $("optSmooth").value = S.smooth;
   $$("#segTier button").forEach((b) => b.classList.toggle("on", b.dataset.tier === S.tier));
-  $("tierHint").textContent = `${TIERS[S.tier].label}：` + ({ low: "手機建議，臉和手隔幀更新", mid: "平板/一般電腦建議", high: "身體用高精度模型，需要較強的電腦" })[S.tier];
+  $("tierHint").textContent = `${TIERS[S.tier].label}：` + ({ low: "手機建議：輕量身體模型，臉和手隔幀更新", mid: "平板／電腦建議：標準身體模型", high: "最精準的身體模型，需要有獨立顯卡的電腦" })[S.tier];
   const sp = !!S.split && running;   // 只在動捕進行中才分割
   if (document.body.classList.contains("split") !== sp) { document.body.classList.toggle("split", sp); requestAnimationFrame(resize); }
   $("optSplit").checked = !!S.split; $("btnSplit").classList.toggle("on", !!S.split);
@@ -201,7 +201,7 @@ function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(S.
 $("optSplit").onchange = (e) => setSplit(e.target.checked);
 $("btnSplit").onclick = () => setSplit(!S.split);
 $("optSkel").onchange = (e) => { S.showSkel = e.target.checked; save(); clearOverlay(); };
-$("optSmooth").oninput = (e) => { S.smooth = +e.target.value; save(); };
+$("optSmooth").oninput = (e) => { S.smooth = +e.target.value; tracker.setSmooth(S.smooth); save(); };
 $("optFace").onchange = (e) => { S.useFace = e.target.checked; save(); applyTracking(); };
 $("optHands").onchange = (e) => { S.useHands = e.target.checked; save(); applyTracking(); };
 $("segTier").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; S.tier = b.dataset.tier; save(); syncUI(); applyTracking(); });
@@ -556,7 +556,7 @@ function loop() {
   if (now - fpsT > 1000) { $("fps").textContent = running ? `${Math.round(fpsN * 1000 / (now - fpsT))} fps` : "—"; fpsN = 0; fpsT = now; }
   stage.update(running ? frame || lastFrame : null, {
     mirror: S.mirror, fullBody: S.mode === "full", useHands: S.useHands, useFace: S.useFace,
-    responsiveness: 4 + (100 - S.smooth) * 0.36,
+    responsiveness: 14 + (100 - S.smooth) * 0.3,   // 去抖動主要交給 One Euro，骨頭這層只做輕微平滑
   });
 }
 
@@ -584,7 +584,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 setInterval(checkVersion, 5 * 60 * 1000);
 
 /* ---------------- 啟動 ---------------- */
-applyBg(); syncUI();
+applyBg(); syncUI(); tracker.setSmooth(S.smooth);
 if (pairParam !== null) setupCamMode();
 else loadModel(S.model, { silent: true });
 requestAnimationFrame(loop);

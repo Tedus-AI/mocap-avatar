@@ -46,6 +46,16 @@ function frameRot(a0, b0, a1, b1) {
   const m = m1.multiply(m0.transpose());
   return Q().setFromRotationMatrix(m);
 }
+/** 把「指向左方」的向量水平轉角限制在 ±max 內（單鏡頭很難分辨正面與側面，深度雜訊會讓身體突然轉向） */
+function clampYaw(v, left0, max) {
+  const up = new THREE.Vector3(0, 1, 0);
+  const h = v.clone().projectOnPlane(up), h0 = left0.clone().projectOnPlane(up).normalize();
+  const len = h.length(); if (len < 1e-6) return v;
+  const ang = Math.atan2(new THREE.Vector3().crossVectors(h0, h).dot(up), h0.dot(h));
+  if (Math.abs(ang) <= max) return v;
+  const nh = h0.applyAxisAngle(up, Math.sign(ang) * max).multiplyScalar(len);
+  return nh.add(up.multiplyScalar(v.y));
+}
 /** 最小旋轉：讓 from 方向轉到 to 方向 */
 function aim(from, to) {
   if (to.lengthSq() < 1e-8) return Q();
@@ -149,7 +159,7 @@ export class Rig {
       const w = pose.world;
       const sh = (i) => cv(w[i]);
       const shL = sh(P.lSh), shR = sh(P.rSh);
-      const shLine = mirror ? V().subVectors(shR, shL) : V().subVectors(shL, shR);   // 指向角色左方
+      let shLine = mirror ? V().subVectors(shR, shL) : V().subVectors(shL, shR);   // 指向角色左方
       const shMid = V().addVectors(shL, shR).multiplyScalar(0.5);
       const hipL = cv(w[P.lHip]), hipR = cv(w[P.rHip]);
       const hipMid = V().addVectors(hipL, hipR).multiplyScalar(0.5);
@@ -157,8 +167,13 @@ export class Rig {
       const left0 = this.sem(V(1, 0, 0)), up0 = this.sem(V(0, 1, 0));
       let torsoUp = hipsOk ? V().subVectors(shMid, hipMid) : up0.clone();
 
+      shLine = clampYaw(shLine, left0, 1.4);   // 胸口最多轉 80°
       if (opts.fullBody && hipsOk) {
-        const hipLine = mirror ? V().subVectors(hipR, hipL) : V().subVectors(hipL, hipR);
+        let hipLine = mirror ? V().subVectors(hipR, hipL) : V().subVectors(hipL, hipR);
+        // 臀部左右點很接近，深度雜訊大：和肩線各半混合，並限制轉角 ±70°
+        hipLine = hipLine.normalize().add(shLine.clone().normalize());
+        if (hipLine.lengthSq() < 0.01) hipLine = shLine.clone();
+        hipLine = clampYaw(hipLine, left0, 1.2);
         hipsW = frameRot(left0, up0, hipLine, torsoUp);
       } else if (hipsOk) {
         // 上半身模式：臀部只跟一點點身體前傾，保持穩定
@@ -228,8 +243,9 @@ export class Rig {
         if (!ok && opts.fullBody && nowL - (this.lastSeen[av + "Leg"] ?? -9) < this.HOLD) {
           this._keep([av + "UpperLeg", av + "LowerLeg", av + "Foot"], hipsW, W);
         } else if (ok) {
-          aimBone(av + "UpperLeg", hipsW, V().subVectors(cv(w[iKn]), cv(w[iHip])));
-          aimBone(av + "LowerLeg", W[av + "UpperLeg"], V().subVectors(cv(w[iAn]), cv(w[iKn])));
+          const { thigh, shin } = this._legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, frame.aspect || 1.333);
+          aimBone(av + "UpperLeg", hipsW, thigh);
+          aimBone(av + "LowerLeg", W[av + "UpperLeg"], shin);
           if (vis(iFt) > 0.4) aimBone(av + "Foot", W[av + "LowerLeg"], V().subVectors(cv(w[iFt]), cv(w[iAn])));
           else T.set(av + "Foot", Q());
         } else {
@@ -273,6 +289,34 @@ export class Rig {
       const topW = W[this.hasUpperChest ? "upperChest" : "chest"] || Q();
       this._applyHead(topW.clone().invert().multiply(qRig), topW);
     }
+  }
+
+  /** 腿的方向：抑制深度雜訊＋關節限制
+   *  1. 前後（深度）分量只取 70%：單鏡頭的深度最不準
+   *  2. 畫面上腿是直的、且大腿沒有明顯縮短（不是正面深蹲）→ 視為直腿
+   *  3. 膝蓋不能往前彎（反關節）→ 拉直 */
+  _legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, aspect) {
+    const fwd = this.sem(V(0, 0, 1)).applyQuaternion(hipsW).normalize();
+    const damp = (v) => v.sub(fwd.clone().multiplyScalar(v.dot(fwd) * 0.3));
+    const thigh = damp(V().subVectors(cv(w[iKn]), cv(w[iHip])));
+    let shin = damp(V().subVectors(cv(w[iAn]), cv(w[iKn])));
+    const lm = pose.lm, H = lm[iHip], K = lm[iKn], A = lm[iAn];
+    const t2 = [(K.x - H.x) * aspect, K.y - H.y], s2 = [(A.x - K.x) * aspect, A.y - K.y];
+    const l1 = Math.hypot(...t2), l2 = Math.hypot(...s2);
+    if (l1 > 1e-4 && l2 > 1e-4) {
+      const cos = (t2[0] * s2[0] + t2[1] * s2[1]) / (l1 * l2);
+      const bend2D = Math.acos(Math.max(-1, Math.min(1, cos))) * 57.3;   // 0 = 直
+      const notForeshortened = l1 / l2 > 0.75;
+      if (notForeshortened && bend2D < 25) {
+        const k = bend2D < 15 ? 1 : (25 - bend2D) / 10;               // 15°內完全拉直，15~25° 漸變
+        const straight = thigh.clone().normalize().multiplyScalar(shin.length());
+        shin = shin.lerp(straight, k);
+      }
+    }
+    // 反關節：小腿相對大腿往身體前方彎 → 拉直
+    const tn = thigh.clone().normalize(), sn = shin.clone().normalize();
+    if (sn.clone().sub(tn).dot(fwd) > 0.05) shin = tn.multiplyScalar(shin.length());
+    return { thigh, shin };
   }
 
   /** 不更新目標旋轉，只沿用上一次的值並算出世界旋轉（給子骨頭用） */

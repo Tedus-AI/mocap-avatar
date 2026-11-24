@@ -2,20 +2,22 @@
    tracker.js — MediaPipe Tasks Vision：身體 / 手 / 臉
    依裝置效能分級，手機自動降低負載
    ===================================================================== */
+import { LandmarkFilter } from "./filters.js?v=__BUILD_VERSION__";
 export const TV_VER = "0.10.14";
 const TV_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TV_VER}`;
 const MODELS = {
   poseLite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   poseFull: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+  poseHeavy: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
   hand: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
   face: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
 };
 
 /** 效能等級：每幾幀跑一次手／臉 */
 export const TIERS = {
-  low:  { label: "省電",  pose: "poseLite", handEvery: 2, faceEvery: 3 },
-  mid:  { label: "平衡",  pose: "poseLite", handEvery: 1, faceEvery: 2 },
-  high: { label: "高品質", pose: "poseFull", handEvery: 1, faceEvery: 1 },
+  low:  { label: "省電",  pose: "poseLite",  handEvery: 2, faceEvery: 3 },
+  mid:  { label: "平衡",  pose: "poseFull",  handEvery: 1, faceEvery: 2 },
+  high: { label: "高品質", pose: "poseHeavy", handEvery: 1, faceEvery: 1 },
 };
 export function autoTier() {
   const ua = navigator.userAgent;
@@ -40,6 +42,17 @@ export class Tracker {
     this.n = 0; this.lastTs = 0;
     this.last = { pose: null, hands: {}, face: null };
     this.delegate = "GPU";
+    // One Euro 濾波：身體（世界座標＋畫面座標）、左右手
+    this.fWorld = new LandmarkFilter(); this.fLm = new LandmarkFilter();
+    this.fHand = { L: [new LandmarkFilter(), new LandmarkFilter()], R: [new LandmarkFilter(), new LandmarkFilter()] };
+    this.setSmooth(45);
+  }
+
+  /** 平滑度 0~100 → 濾波參數（越大越穩、反應略慢） */
+  setSmooth(v) {
+    const minCutoff = 3.0 * Math.pow(0.35 / 3.0, v / 100);   // 3.0Hz ~ 0.35Hz
+    const beta = 0.9 - 0.5 * (v / 100);
+    for (const f of [this.fWorld, this.fLm, ...this.fHand.L, ...this.fHand.R]) f.setParams(minCutoff, beta);
   }
 
   async _lib() {
@@ -66,7 +79,7 @@ export class Tracker {
     const V = this.vision, fs = this.fileset;
     const poseModel = TIERS[tier].pose;
     if (!this.pose || this._poseModel !== poseModel) {
-      onStep(`載入身體追蹤模型（${poseModel === "poseFull" ? "高精度" : "輕量"}）…`);
+      onStep(`載入身體追蹤模型（${{ poseLite: "輕量", poseFull: "標準", poseHeavy: "高精度，約 30MB" }[poseModel]}）…`);
       this.pose?.close?.();
       this.pose = await this._create("身體", (d) => V.PoseLandmarker.createFromOptions(fs, {
         baseOptions: { modelAssetPath: MODELS[poseModel], delegate: d },
@@ -111,12 +124,18 @@ export class Tracker {
     const aspect = w / h;
 
     const pr = this.pose.detectForVideo(video, ts);
-    const pose = pr.landmarks?.length ? { lm: pr.landmarks[0], world: pr.worldLandmarks[0] } : null;
+    const t = ts / 1000;
+    const pose = pr.landmarks?.length ? { lm: this.fLm.apply(pr.landmarks[0], t), world: this.fWorld.apply(pr.worldLandmarks[0], t) } : null;
     this.last.pose = pose;
 
     if (this.useHands && this.hand && n % tier.handEvery === 0) {
       const hr = this.hand.detectForVideo(video, ts);
-      this.last.hands = assignHands(hr, pose, aspect);
+      const hs = assignHands(hr, pose, aspect);
+      for (const k of ["L", "R"]) if (hs[k]) {
+        hs[k].world = this.fHand[k][0].apply(hs[k].world, t);
+        hs[k].lm = this.fHand[k][1].apply(hs[k].lm, t);
+      }
+      this.last.hands = hs;
     }
     if (this.useFace && this.face && n % tier.faceEvery === 0) {
       const fr = this.face.detectForVideo(video, ts);
