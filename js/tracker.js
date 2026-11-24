@@ -131,9 +131,16 @@ export class Tracker {
 
   /** 只跑一次身體偵測，判斷人是不是「站正」的（自動判斷畫面旋轉用） */
   uprightScore(src) {
-    if (!this.pose) return null;
-    let ts = performance.now(); if (ts <= this.lastTs) ts = this.lastTs + 1; this.lastTs = ts;
-    const r = this.pose.detectForVideo(src, ts);
+    // 用獨立的「單張圖片」模型：影片模式會沿用上一幀的追蹤位置，換方向後會找不到人
+    if (!this.poseImg) {
+      if (!this._poseImgP && this.vision) {
+        this._poseImgP = this._create("方向判斷", (d) => this.vision.PoseLandmarker.createFromOptions(this.fileset, {
+          baseOptions: { modelAssetPath: MODELS.poseLite, delegate: d }, runningMode: "IMAGE", numPoses: 1,
+        })).then((m) => { this.poseImg = m; }).catch((e) => { console.warn(e); this._poseImgP = null; });
+      }
+      return undefined;   // 模型還在載入
+    }
+    const r = this.poseImg.detect(src);
     const lm = r.landmarks?.[0]; if (!lm) return null;
     const shY = (lm[11].y + lm[12].y) / 2, hipY = (lm[23].y + lm[24].y) / 2;
     // 頭在肩膀上方、肩膀在臀部上方 → 正

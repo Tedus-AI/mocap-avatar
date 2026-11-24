@@ -296,6 +296,7 @@ function updateAutoRot() {
   for (const r of [90, 270]) {
     drawRot(tctx, r, vw, vh);
     const sc = tracker.uprightScore(testCanvas);
+    if (sc === undefined) return;   // 方向判斷模型載入中
     if (sc !== null && (!best || sc > best.sc)) best = { r, sc };
   }
   if (best && best.sc > 0.04) {
