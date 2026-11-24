@@ -242,11 +242,16 @@ export class Rig {
       for (const av of ["left", "right"]) this._avoidBody(av, W, hipsW);
 
       // ---------- 腿 ----------
+      const legSeen = (iKn, iAn) => vis(iKn) > 0.4 && vis(iAn) > 0.35;
       for (const person of ["L", "R"]) {
         const av = sides[person];
         const iHip = person === "L" ? P.lHip : P.rHip, iKn = person === "L" ? P.lKnee : P.rKnee;
         const iAn = person === "L" ? P.lAnk : P.rAnk, iFt = person === "L" ? P.lFoot : P.rFoot;
-        const ok = opts.fullBody && vis(iKn) > 0.4 && vis(iAn) > 0.35;
+        // 側身時遠側的腿被擋住（可見度低），但 MediaPipe 推估的位置通常和近側腿平行、相當準：
+        // 另一條腿看得到、且這條腿的膝蓋腳踝都在畫面內 → 照樣採用（不然會變成一條腿直直站著）
+        const other = person === "L" ? legSeen(P.rKnee, P.rAnk) : legSeen(P.lKnee, P.lAnk);
+        const hidden = other && hipsOk && inFrame(iKn) && inFrame(iAn) && vis(iKn) > 0.1 && vis(iAn) > 0.1;
+        const ok = opts.fullBody && (legSeen(iKn, iAn) || hidden);
         const nowL = opts.idleT || 0;
         if (ok) this.lastSeen[av + "Leg"] = nowL;
         if (!ok && opts.fullBody && nowL - (this.lastSeen[av + "Leg"] ?? -9) < this.HOLD) {
