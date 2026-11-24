@@ -74,6 +74,7 @@ export class Rig {
     this.lastSeen = {};        // 肢體最後一次被看清楚的時間（秒）
     this.HOLD = 0.8;           // 看不清楚時，維持上一個姿勢多久再慢慢放鬆
     this._measureRest();
+    try { this._measureBody(); } catch (e) { console.warn("身體輪廓量測失敗，略過防穿模", e); this.body = null; }
   }
 
   /** 讀取 T-pose 靜止姿勢下各骨頭位置（rig 根節點座標系） */
@@ -232,6 +233,9 @@ export class Rig {
         }
       }
 
+      // ---------- 防穿模：手進到身體／裙子裡就把手臂往前推 ----------
+      for (const av of ["left", "right"]) this._avoidBody(av, W, hipsW);
+
       // ---------- 腿 ----------
       for (const person of ["L", "R"]) {
         const av = sides[person];
@@ -317,6 +321,96 @@ export class Rig {
     const tn = thigh.clone().normalize(), sn = shin.clone().normalize();
     if (sn.clone().sub(tn).dot(fwd) > 0.05) shin = tn.multiplyScalar(shin.length());
     return { thigh, shin };
+  }
+
+  /* ------------------------------------------------------------------
+     防穿模：載入時從模型網格量出「身體正面輪廓」
+     只取綁在軀幹（臀、脊椎、胸、大腿、及其下的裙子骨頭）的頂點，排除頭髮、手臂
+     結果：每 2cm 高度，身體最前面的位置（相對臀部，語意座標：+Z 朝前）
+     ------------------------------------------------------------------ */
+  _measureBody() {
+    const h = this.h, vrm = this.vrm;
+    const torsoNames = ["hips", "spine", "chest", "upperChest", "leftUpperLeg", "rightUpperLeg"];
+    const rawToName = new Map();
+    for (const n of Object.keys(h.humanBones)) { const r = h.getRawBoneNode(n); if (r) rawToName.set(r, n); }
+    const cache = new Map();
+    const isTorso = (bone) => {
+      if (cache.has(bone)) return cache.get(bone);
+      let b = bone, res = false;
+      while (b) { if (rawToName.has(b)) { res = torsoNames.includes(rawToName.get(b)); break; } b = b.parent; }
+      cache.set(bone, res); return res;
+    };
+    vrm.scene.updateMatrixWorld(true);
+    const Minv = this.M.clone().transpose();   // 正交矩陣：轉置＝反矩陣（rig → 語意）
+    const toSem = this.root.matrixWorld.clone().invert().premultiply(Minv);
+    const hips = this.pos.hips.clone().applyMatrix4(Minv);
+    const band = Math.abs(this.pos.leftUpperArm.clone().applyMatrix4(Minv).x - hips.x) * 0.85;
+    const Y0 = -0.7, STEP = 0.02, N = 80;
+    const front = new Float32Array(N).fill(-Infinity);
+    const v = new THREE.Vector3(), m = new THREE.Matrix4();
+    vrm.scene.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      const g = o.geometry, pos = g.attributes.position, si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
+      if (!pos || !si || !sw) return;
+      const bones = o.skeleton.bones;
+      m.multiplyMatrices(toSem, o.matrixWorld);
+      for (let i = 0; i < pos.count; i++) {
+        let bj = 0, bw = -1;
+        for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w > bw) { bw = w; bj = si.getComponent(i, k); } }
+        const bone = bones[bj]; if (!bone || !isTorso(bone)) continue;
+        v.fromBufferAttribute(pos, i).applyMatrix4(m).sub(hips);
+        if (Math.abs(v.x) > band) continue;
+        const bi = Math.floor((v.y - Y0) / STEP); if (bi < 0 || bi >= N) continue;
+        if (v.z > front[bi]) front[bi] = v.z;
+      }
+    });
+    // 相鄰高度取最大，填補空隙
+    const sm = new Float32Array(N).fill(-Infinity);
+    for (let i = 0; i < N; i++) for (let d = -1; d <= 1; d++) { const j = i + d; if (j >= 0 && j < N && front[j] > sm[i]) sm[i] = front[j]; }
+    this.body = { front: sm, Y0, STEP, N, band, Minv };
+  }
+
+  /** 計算 av 側手臂各點（以目前目標姿勢），若穿進身體就把上臂往前轉 */
+  _avoidBody(av, W, hipsW) {
+    const B = this.body; if (!B || !W[av + "Hand"] || !W[av + "UpperArm"]) return;
+    const p = this.pos;
+    const chain = ["hips", "spine", "chest", "upperChest", av + "Shoulder", av + "UpperArm", av + "LowerArm", av + "Hand"]
+      .filter((n) => p[n] && W[n]);
+    const fk = () => {
+      const P = { hips: p.hips.clone() };
+      for (let i = 1; i < chain.length; i++) {
+        const a = chain[i - 1], b = chain[i];
+        P[b] = V().subVectors(p[b], p[a]).applyQuaternion(W[a]).add(P[a]);
+      }
+      return P;
+    };
+    const hipsInv = hipsW.clone().invert();
+    const fwdW = this.sem(V(0, 0, 1)).applyQuaternion(hipsW).normalize();
+    const handLen = p[av + "MiddleProximal"] ? p[av + "MiddleProximal"].distanceTo(p[av + "Hand"]) * 1.9 : 0.08;
+    const MARGIN = 0.03;
+    const upper = av + "UpperArm", lower = av + "LowerArm", hand = av + "Hand";
+    const parentW = W[chain[chain.indexOf(upper) - 1]];
+    for (let iter = 0; iter < 4; iter++) {
+      const P = fk();
+      const tip = this.rd[av + "HandFwd"].clone().applyQuaternion(W[hand]).multiplyScalar(handLen).add(P[hand]);
+      const samples = [P[hand], tip, V().addVectors(P[lower], P[hand]).multiplyScalar(0.5)];
+      let worst = null;
+      for (const sPt of samples) {
+        const r = V().subVectors(sPt, P.hips).applyQuaternion(hipsInv).applyMatrix4(B.Minv);
+        if (Math.abs(r.x) > B.band) continue;
+        const bi = Math.floor((r.y - B.Y0) / B.STEP); if (bi < 0 || bi >= B.N || !isFinite(B.front[bi])) continue;
+        const pen = B.front[bi] + MARGIN - r.z;
+        if (pen > 0.002 && (!worst || pen > worst.pen)) worst = { pt: sPt, pen };
+      }
+      if (!worst) return;
+      // 以肩膀為圓心，把上臂轉到讓最深的那點移到身體表面外
+      const sh = P[upper];
+      const from = V().subVectors(worst.pt, sh), to = V().addVectors(worst.pt, fwdW.clone().multiplyScalar(worst.pen)).sub(sh);
+      const q = aim(from, to);
+      for (const n of [upper, lower, hand]) W[n] = q.clone().multiply(W[n]);
+      this.target.set(upper, parentW.clone().invert().multiply(W[upper]));
+      // 前臂、手掌、手指的本地旋轉不變（父子一起轉）
+    }
   }
 
   /** 不更新目標旋轉，只沿用上一次的值並算出世界旋轉（給子骨頭用） */
