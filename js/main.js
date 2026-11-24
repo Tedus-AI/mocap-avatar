@@ -23,7 +23,11 @@ const DEFAULTS = {
   split: false,         // 分割畫面：左角色／右鏡頭
 };
 const S = { ...DEFAULTS };
-function load() { try { Object.assign(S, JSON.parse(localStorage.getItem(STORE_KEY) || "{}")); } catch (e) {} if (!TIERS[S.tier]) S.tier = autoTier(); }
+function load() {
+  try { Object.assign(S, JSON.parse(localStorage.getItem(STORE_KEY) || "{}")); } catch (e) {}
+  if (!TIERS[S.tier]) S.tier = autoTier();
+  S.rot = "auto";   // 手動旋轉只在這次使用有效，不保存（避免下次打開還是轉錯）
+}
 function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) {} }
 load();
 
@@ -217,8 +221,8 @@ $("segRot").addEventListener("click", (e) => {
   S.rot = b.dataset.rot === "auto" ? "auto" : +b.dataset.rot; save(); resetAutoRot(); syncUI();
 });
 $("pipRotate").onclick = () => {
-  S.rot = (curRot() + 90) % 360; save(); syncUI();
-  toast(`畫面已旋轉為 ${S.rot}°（設定 › 畫面旋轉 可改回「自動」）`);
+  S.rot = (curRot() + 90) % 360; syncUI();
+  toast(`畫面已手動旋轉為 ${S.rot}°。手機重新連線或轉向時會回到自動`);
 };
 $("btnView").onclick = () => stage.frame(S.mode);
 $("btnFlip").onclick = async () => {
@@ -281,38 +285,63 @@ function sourceFrame() {
   drawRot(sctx, r, vw, vh);
   return { el: srcCanvas, w: sw, h: sh, rot: r };
 }
-function updateAutoRot() {
-  if (S.rot !== "auto") return;
-  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !remoteInfo) { autoRot = 0; return; }
-  // 手機說「直放」，收到的卻是橫向影像（或相反）→ 影像沒轉正
-  const mismatch = remoteInfo.portrait !== (vh > vw) && Math.abs(vw - vh) > 8;
-  const key = `${vw}x${vh}|${remoteInfo.portrait}|${remoteInfo.facing}`;
-  if (key !== autoKey) { autoKey = key; autoLocked = false; autoRot = mismatch ? 90 : 0; }
-  if (!mismatch || autoLocked) return;
-  const now = performance.now(); if (now - autoLastTry < 800) return; autoLastTry = now;
-  // 90° 與 270° 各試一次，選畫面中人「站正」的方向
-  testCanvas.width = vh; testCanvas.height = vw;
+let upsideSince = 0;
+/** 軀幹與「向上」的夾角：0°＝站正、180°＝上下顛倒（以目前送去追蹤的畫面為準） */
+function torsoAngle(lm) {
+  const dx = (lm[11].x + lm[12].x - lm[23].x - lm[24].x) / 2, dy = (lm[11].y + lm[12].y - lm[23].y - lm[24].y) / 2;
+  const len = Math.hypot(dx, dy); if (len < 1e-4) return 0;
+  return Math.acos(Math.max(-1, Math.min(1, -dy / len))) * 57.3;
+}
+/** 對原始影像試幾個旋轉角，回傳人「最站正」的那個；模型載入中回傳 undefined */
+function testRotations(cands) {
+  const vw = video.videoWidth, vh = video.videoHeight;
   let best = null;
-  for (const r of [90, 270]) {
+  for (const r of cands) {
+    testCanvas.width = r % 180 ? vh : vw; testCanvas.height = r % 180 ? vw : vh;
     drawRot(tctx, r, vw, vh);
     const sc = tracker.uprightScore(testCanvas);
-    if (sc === undefined) return;   // 方向判斷模型載入中
+    if (sc === undefined) return undefined;
     if (sc !== null && (!best || sc > best.sc)) best = { r, sc };
   }
-  if (best && best.sc > 0.04) {
-    autoRot = best.r; autoLocked = true;
-    toast(`偵測到手機直放，畫面已自動轉正（${best.r}°）`);
+  return best;
+}
+function updateAutoRot() {
+  if (S.rot !== "auto") return;
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
+  const now = performance.now();
+  // A. 手機回報直放／橫放，但收到的影像方向不符 → 試 90°/270°
+  const key = `${vw}x${vh}|${remoteInfo?.portrait}|${remoteInfo?.facing}`;
+  const mismatch = !!remoteInfo && remoteInfo.portrait !== (vh > vw) && Math.abs(vw - vh) > 8;
+  if (key !== autoKey) { autoKey = key; autoLocked = false; upsideSince = 0; autoRot = mismatch ? 90 : 0; }
+  if (mismatch && !autoLocked && now - autoLastTry > 800) {
+    autoLastTry = now;
+    const best = testRotations([90, 270]);
+    if (best && best.sc > 0.04) { autoRot = best.r; autoLocked = true; toast(`偵測到手機直放，畫面已自動轉正（${best.r}°）`); }
+    return;
+  }
+  // B. 任何來源：人持續上下顛倒超過 1.2 秒 → 四個方向都試，選站正的
+  const p = tracker.last.pose;
+  const ok = p && [11, 12, 23, 24].every((i) => (p.lm[i].visibility ?? 1) > 0.5);
+  if (ok && torsoAngle(p.lm) > 120) upsideSince ||= now; else upsideSince = 0;
+  if (upsideSince && now - upsideSince > 1200 && now - autoLastTry > 800) {
+    autoLastTry = now;
+    const best = testRotations([0, 90, 180, 270]);
+    if (best === undefined) return;
+    if (best && best.sc > 0.04 && best.r !== autoRot) {
+      autoRot = best.r; autoLocked = true; upsideSince = 0;
+      toast(`偵測到畫面上下顛倒，已自動轉正（${best.r}°）`);
+    }
   }
 }
 
 /* ---------------- 小畫面尺寸跟著影像比例 ---------------- */
 function layoutPip(w, h, rot) {
   const p = $("pip"), small = p.classList.contains("small");
-  const key = `${w}x${h}|${small}|${innerWidth}x${innerHeight}|${rot}|${S.split}`;
+  const key = `${w}x${h}|${small}|${innerWidth}x${innerHeight}|${rot}|${S.split}|${S.rot}`;
   if (key === pipKey) return; pipKey = key;
   $("cam").classList.toggle("hidden", !!rot);
   srcCanvas.classList.toggle("hidden", !rot);
-  $("pipInfo").textContent = `${h > w ? "直向" : "橫向"} ${w}×${h}${rot ? `・已轉 ${rot}°` : ""}`;
+  $("pipInfo").textContent = `${h > w ? "直向" : "橫向"} ${w}×${h}${rot ? `・${S.rot === "auto" ? "自動" : "手動"}轉 ${rot}°` : ""}`;
   if (S.split) { p.style.width = ""; p.style.aspectRatio = ""; return; }   // 分割畫面：交給 CSS
   const phone = matchMedia("(max-width:560px)").matches;
   const low = matchMedia("(max-height:500px) and (orientation:landscape)").matches;
@@ -389,13 +418,14 @@ async function startPairing() {
       onStream: async (s) => {
         stream = s; video.srcObject = s; video.muted = true;
         try { await video.play(); } catch (e) {}
-        S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; save(); resetAutoRot();
+        S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; S.rot = "auto"; save(); resetAutoRot();
         if (!running) { try { await beginTracking(); } catch (e) { $("pairStatus").textContent = e.message; } }
         else { pill("warn", "尋找人物中…"); toast("手機重新連上了"); }
       },
       onData: (d) => {
         if (d?.type !== "info") return;
         const facingChanged = d.facing !== remoteInfo?.facing;
+        if (remoteInfo && d.portrait !== remoteInfo.portrait) S.rot = "auto";   // 手機轉向了：手動旋轉失效
         remoteInfo = d;
         if (facingChanged) { S.mirror = d.facing === "user"; save(); }   // 前鏡頭＝鏡像
         resetAutoRot(); syncUI();
