@@ -100,14 +100,15 @@ export class Tracker {
   }
 
   /** 每幀呼叫；回傳最新結果（手/臉沒跑的幀沿用上次） */
-  detect(video) {
-    if (!this.pose || video.readyState < 2 || !video.videoWidth) return null;
+  /** src 可以是 <video> 或已旋轉的 <canvas>；w/h 為其像素尺寸 */
+  detect(video, w = video.videoWidth, h = video.videoHeight) {
+    if (!this.pose || !w || (video.readyState !== undefined && video.readyState < 2)) return null;
     let ts = performance.now();
     if (ts <= this.lastTs) ts = this.lastTs + 1;
     this.lastTs = ts;
     const tier = TIERS[this.tier];
     const n = this.n++;
-    const aspect = video.videoWidth / video.videoHeight;
+    const aspect = w / h;
 
     const pr = this.pose.detectForVideo(video, ts);
     const pose = pr.landmarks?.length ? { lm: pr.landmarks[0], world: pr.worldLandmarks[0] } : null;
@@ -126,6 +127,17 @@ export class Tracker {
       } else this.last.face = null;
     }
     return { pose, hands: this.last.hands, face: this.useFace ? this.last.face : null, aspect };
+  }
+
+  /** 只跑一次身體偵測，判斷人是不是「站正」的（自動判斷畫面旋轉用） */
+  uprightScore(src) {
+    if (!this.pose) return null;
+    let ts = performance.now(); if (ts <= this.lastTs) ts = this.lastTs + 1; this.lastTs = ts;
+    const r = this.pose.detectForVideo(src, ts);
+    const lm = r.landmarks?.[0]; if (!lm) return null;
+    const shY = (lm[11].y + lm[12].y) / 2, hipY = (lm[23].y + lm[24].y) / 2;
+    // 頭在肩膀上方、肩膀在臀部上方 → 正
+    return (shY - lm[0].y) + (hipY - shY) * 0.5;
   }
 }
 

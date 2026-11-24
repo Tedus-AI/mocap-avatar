@@ -19,6 +19,8 @@ const DEFAULTS = {
   mode: "upper", src: "local", facing: "user", mirror: true,
   useFace: true, useHands: true, tier: autoTier(), smooth: 45,
   showPip: true, showSkel: true, bg: "studio", model: DEFAULT_MODEL,
+  rot: "auto",          // 畫面旋轉："auto" 或 0/90/180/270
+  split: false,         // 分割畫面：左角色／右鏡頭
 };
 const S = { ...DEFAULTS };
 function load() { try { Object.assign(S, JSON.parse(localStorage.getItem(STORE_KEY) || "{}")); } catch (e) {} if (!TIERS[S.tier]) S.tier = autoTier(); }
@@ -50,8 +52,9 @@ const video = $("cam");
 let stream = null, running = false, host = null, fileUrl = null;
 let lastFrame = null, noPersonSince = 0, fpsN = 0, fpsT = performance.now();
 let modelBusy = false;
+let pipKey = "";   // 小畫面版面快取鍵（resize 時清空）
 
-function resize() { stage.resize(window.innerWidth, window.innerHeight); }
+function resize() { const r = canvas.getBoundingClientRect(); stage.resize(Math.max(1, r.width), Math.max(1, r.height)); pipKey = ""; }
 window.addEventListener("resize", resize);
 resize();
 
@@ -179,9 +182,13 @@ function syncUI() {
   $("optPip").checked = S.showPip; $("optSkel").checked = S.showSkel; $("optSmooth").value = S.smooth;
   $$("#segTier button").forEach((b) => b.classList.toggle("on", b.dataset.tier === S.tier));
   $("tierHint").textContent = `${TIERS[S.tier].label}：` + ({ low: "手機建議，臉和手隔幀更新", mid: "平板/一般電腦建議", high: "身體用高精度模型，需要較強的電腦" })[S.tier];
-  $("pip").classList.toggle("hidden", !(running && S.showPip));
+  const sp = !!S.split && running;   // 只在動捕進行中才分割
+  if (document.body.classList.contains("split") !== sp) { document.body.classList.toggle("split", sp); requestAnimationFrame(resize); }
+  $("optSplit").checked = !!S.split; $("btnSplit").classList.toggle("on", !!S.split);
+  $("pip").classList.toggle("hidden", !(running && (S.showPip || S.split)));
   $("pip").classList.toggle("mirror", S.mirror);
-  $("btnFlip").disabled = !(running && S.src === "local");
+  $("btnFlip").disabled = !(running && (S.src === "local" || S.src === "phone"));
+  $$("#segRot button").forEach((b) => b.classList.toggle("on", b.dataset.rot === String(S.rot)));
   $("verTxt").textContent = IS_DEV ? "開發版" : VERSION;
 }
 function setMode(m) { S.mode = m; save(); stage.frame(m); syncUI(); }
@@ -190,6 +197,9 @@ $$("#srcChoices .choice").forEach((b) => b.addEventListener("click", () => { S.s
 $$("#startFacing button").forEach((b) => b.addEventListener("click", () => { S.facing = b.dataset.facing; S.mirror = S.facing === "user"; save(); syncUI(); }));
 $("optMirror").onchange = (e) => { S.mirror = e.target.checked; save(); syncUI(); };
 $("optPip").onchange = (e) => { S.showPip = e.target.checked; save(); syncUI(); };
+function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(S.mode, true); }
+$("optSplit").onchange = (e) => setSplit(e.target.checked);
+$("btnSplit").onclick = () => setSplit(!S.split);
 $("optSkel").onchange = (e) => { S.showSkel = e.target.checked; save(); clearOverlay(); };
 $("optSmooth").oninput = (e) => { S.smooth = +e.target.value; save(); };
 $("optFace").onchange = (e) => { S.useFace = e.target.checked; save(); applyTracking(); };
@@ -201,9 +211,21 @@ async function applyTracking() {
   try { pill("busy", "更新追蹤設定…"); await tracker.init({ tier: S.tier, useFace: S.useFace, useHands: S.useHands }, (t) => pill("busy", t)); }
   catch (e) { toast("載入模型失敗：" + e.message, { err: true }); }
 }
-$("pipToggle").onclick = () => $("pip").classList.toggle("small");
+$("pipToggle").onclick = () => { $("pip").classList.toggle("small"); pipKey = ""; };
+$("segRot").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  S.rot = b.dataset.rot === "auto" ? "auto" : +b.dataset.rot; save(); resetAutoRot(); syncUI();
+});
+$("pipRotate").onclick = () => {
+  S.rot = (curRot() + 90) % 360; save(); syncUI();
+  toast(`畫面已旋轉為 ${S.rot}°（設定 › 畫面旋轉 可改回「自動」）`);
+};
 $("btnView").onclick = () => stage.frame(S.mode);
 $("btnFlip").onclick = async () => {
+  if (S.src === "phone") {   // 手機當鏡頭：請手機切換前後鏡頭
+    if (!host?.conn?.open) { toast("手機還沒連上", { err: true }); return; }
+    host.send({ type: "flip" }); toast("已請手機切換鏡頭"); return;
+  }
   S.facing = S.facing === "user" ? "environment" : "user"; S.mirror = S.facing === "user"; save();
   try { await startCamera(); syncUI(); toast(S.facing === "user" ? "已切到前鏡頭（鏡像開啟）" : "已切到後鏡頭（鏡像關閉）"); }
   catch (e) { toast(camError(e), { err: true }); }
@@ -227,8 +249,76 @@ function camError(e) {
 }
 async function getCam(facing) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("這個瀏覽器不支援鏡頭（需要 HTTPS 網址）");
+  // 直放時要直向畫面（全身才拍得到腳）
+  const portrait = innerHeight > innerWidth && navigator.maxTouchPoints > 0;
   return navigator.mediaDevices.getUserMedia({ audio: false,
-    video: { facingMode: { ideal: facing }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } } });
+    video: { facingMode: { ideal: facing }, width: { ideal: portrait ? 720 : 1280 }, height: { ideal: portrait ? 1280 : 720 }, frameRate: { ideal: 30, max: 30 } } });
+}
+
+/* ---------------- 畫面旋轉：手機直放但傳來的影像沒轉正時，自動轉回來 ---------------- */
+const srcCanvas = $("srcCanvas"), sctx = srcCanvas.getContext("2d");
+const testCanvas = document.createElement("canvas"), tctx = testCanvas.getContext("2d");
+let remoteInfo = null;                         // 手機回報 {portrait, facing, w, h}
+let autoRot = 0, autoKey = "", autoLocked = false, autoLastTry = 0;
+const curRot = () => (S.rot === "auto" ? autoRot : +S.rot) || 0;
+function resetAutoRot() { autoKey = ""; autoLocked = false; }
+function drawRot(ctx, r, vw, vh) {
+  ctx.save();
+  if (r === 90) { ctx.translate(vh, 0); ctx.rotate(Math.PI / 2); }
+  else if (r === 180) { ctx.translate(vw, vh); ctx.rotate(Math.PI); }
+  else if (r === 270) { ctx.translate(0, vw); ctx.rotate(-Math.PI / 2); }
+  ctx.drawImage(video, 0, 0, vw, vh);
+  ctx.restore();
+}
+/** 目前要餵給追蹤與小畫面的影像（必要時先旋轉） */
+function sourceFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const r = curRot();
+  if (!r) return { el: video, w: vw, h: vh, rot: 0 };
+  const sw = r % 180 ? vh : vw, sh = r % 180 ? vw : vh;
+  if (srcCanvas.width !== sw || srcCanvas.height !== sh) { srcCanvas.width = sw; srcCanvas.height = sh; }
+  drawRot(sctx, r, vw, vh);
+  return { el: srcCanvas, w: sw, h: sh, rot: r };
+}
+function updateAutoRot() {
+  if (S.rot !== "auto") return;
+  const vw = video.videoWidth, vh = video.videoHeight; if (!vw || !remoteInfo) { autoRot = 0; return; }
+  // 手機說「直放」，收到的卻是橫向影像（或相反）→ 影像沒轉正
+  const mismatch = remoteInfo.portrait !== (vh > vw) && Math.abs(vw - vh) > 8;
+  const key = `${vw}x${vh}|${remoteInfo.portrait}|${remoteInfo.facing}`;
+  if (key !== autoKey) { autoKey = key; autoLocked = false; autoRot = mismatch ? 90 : 0; }
+  if (!mismatch || autoLocked) return;
+  const now = performance.now(); if (now - autoLastTry < 800) return; autoLastTry = now;
+  // 90° 與 270° 各試一次，選畫面中人「站正」的方向
+  testCanvas.width = vh; testCanvas.height = vw;
+  let best = null;
+  for (const r of [90, 270]) {
+    drawRot(tctx, r, vw, vh);
+    const sc = tracker.uprightScore(testCanvas);
+    if (sc !== null && (!best || sc > best.sc)) best = { r, sc };
+  }
+  if (best && best.sc > 0.04) {
+    autoRot = best.r; autoLocked = true;
+    toast(`偵測到手機直放，畫面已自動轉正（${best.r}°）`);
+  }
+}
+
+/* ---------------- 小畫面尺寸跟著影像比例 ---------------- */
+function layoutPip(w, h, rot) {
+  const p = $("pip"), small = p.classList.contains("small");
+  const key = `${w}x${h}|${small}|${innerWidth}x${innerHeight}|${rot}|${S.split}`;
+  if (key === pipKey) return; pipKey = key;
+  $("cam").classList.toggle("hidden", !!rot);
+  srcCanvas.classList.toggle("hidden", !rot);
+  $("pipInfo").textContent = `${h > w ? "直向" : "橫向"} ${w}×${h}${rot ? `・已轉 ${rot}°` : ""}`;
+  if (S.split) { p.style.width = ""; p.style.aspectRatio = ""; return; }   // 分割畫面：交給 CSS
+  const phone = matchMedia("(max-width:560px)").matches;
+  const low = matchMedia("(max-height:500px) and (orientation:landscape)").matches;
+  let maxW = phone ? 140 : low ? 170 : 260, maxH = phone ? 200 : low ? 150 : 320;
+  if (small) { maxW *= 0.55; maxH *= 0.55; }
+  p.style.width = Math.round(Math.min(maxW, maxH * w / h)) + "px";
+  p.style.aspectRatio = `${w} / ${h}`;
 }
 async function startCamera() {
   stopStream();
@@ -242,6 +332,7 @@ function stopStream() {
   if (fileUrl) { URL.revokeObjectURL(fileUrl); fileUrl = null; video.removeAttribute("src"); }
 }
 function stopAll() {
+  remoteInfo = null; resetAutoRot();
   running = false; stopStream(); host?.close(); host = null; releaseWake(); syncUI(); clearOverlay();
 }
 
@@ -297,9 +388,16 @@ async function startPairing() {
       onStream: async (s) => {
         stream = s; video.srcObject = s; video.muted = true;
         try { await video.play(); } catch (e) {}
-        S.mirror = true; save();
+        S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; save(); resetAutoRot();
         if (!running) { try { await beginTracking(); } catch (e) { $("pairStatus").textContent = e.message; } }
         else { pill("warn", "尋找人物中…"); toast("手機重新連上了"); }
+      },
+      onData: (d) => {
+        if (d?.type !== "info") return;
+        const facingChanged = d.facing !== remoteInfo?.facing;
+        remoteInfo = d;
+        if (facingChanged) { S.mirror = d.facing === "user"; save(); }   // 前鏡頭＝鏡像
+        resetAutoRot(); syncUI();
       },
     });
   } catch (e) {
@@ -317,48 +415,92 @@ async function startPairing() {
 }
 $("btnPairCancel").onclick = () => { host?.close(); host = null; $("pairHost").classList.add("hidden"); $("start").classList.remove("hidden"); };
 
-/* ---------------- 手機端：鏡頭模式（網址帶 ?pair=） ---------------- */
+/* ---------------- 手機端：鏡頭模式（網址帶 ?pair=，或開始畫面按「這支手機要當鏡頭」） ---------------- */
 const pairParam = new URLSearchParams(location.search).get("pair");
-let camLink = null, camFacing = "environment", camStream = null;
+let camLink = null, camFacing = "environment", camStream = null, camSetup = false, barTimer = null;
+function camSay(msg) { $("camStatus").textContent = msg; }
+function showCamCard(on) {            // 大卡片（輸入配對碼）只在還沒連線時出現
+  $("camUi").classList.toggle("hidden", !on);
+  if (on) { $("camBar").classList.add("hidden"); $("camChip").classList.add("hidden"); clearTimeout(barTimer); }
+}
+function showCamBar() {               // 傳送中：頂端細列，3 秒後收成角落小圓點
+  $("camChip").classList.add("hidden"); $("camBar").classList.remove("hidden");
+  clearTimeout(barTimer); barTimer = setTimeout(hideCamBar, 3000);
+}
+function hideCamBar() { $("camBar").classList.add("hidden"); $("camChip").classList.remove("hidden"); }
+function camInfo() {
+  const st = camStream?.getVideoTracks()[0]?.getSettings?.() || {};
+  return { type: "info", portrait: innerHeight > innerWidth, facing: camFacing, w: st.width || 0, h: st.height || 0 };
+}
+function sendCamInfo() {
+  camLink?.send(camInfo());
+  const i = camInfo();
+  $("camBarTxt").textContent = `傳送中・${i.portrait ? "直放" : "橫放"}・${camFacing === "user" ? "前" : "後"}鏡頭`;
+}
+async function camFlip(to) {
+  camFacing = to || (camFacing === "user" ? "environment" : "user");
+  $$("#camFacing button").forEach((b) => b.classList.toggle("on", b.dataset.facing === camFacing));
+  $("camSend").classList.toggle("mirror", camFacing === "user");
+  if (!camStream) return;
+  try {
+    const ns = await getCam(camFacing);
+    await camLink?.replaceTrack(ns.getVideoTracks()[0]);
+    camStream.getTracks().forEach((t) => t.stop()); camStream = ns; $("camSend").srcObject = ns;
+    sendCamInfo();
+  } catch (err) { camSay(camError(err)); showCamCard(true); }
+}
+function camStop(msg = "已停止") {
+  camLink?.close(); camLink = null;
+  camStream?.getTracks().forEach((t) => t.stop()); camStream = null; $("camSend").srcObject = null;
+  $("btnCamGo").textContent = "開始傳送"; camSay(msg); showCamCard(true); releaseWake();
+}
 function setupCamMode() {
   $("start").classList.add("hidden"); $("camMode").classList.remove("hidden");
   $("dock").classList.add("hidden"); document.querySelector(".topbar").classList.add("hidden");
+  $("pip").classList.add("hidden");
   if (pairParam) $("camCode").value = pairParam.replace(/\D/g, "").slice(0, 6);
-  const sv = $("camSend");
-  const setFacingUI = () => { $$("#camFacing button").forEach((b) => b.classList.toggle("on", b.dataset.facing === camFacing)); sv.classList.toggle("mirror", camFacing === "user"); };
-  setFacingUI();
-  $("camFacing").addEventListener("click", async (e) => {
-    const b = e.target.closest("button"); if (!b) return;
-    camFacing = b.dataset.facing; setFacingUI();
-    if (camStream) {
-      try {
-        const ns = await getCam(camFacing);
-        camLink?.replaceTrack(ns.getVideoTracks()[0]);
-        camStream.getTracks().forEach((t) => t.stop()); camStream = ns; sv.srcObject = ns;
-      } catch (err) { $("camStatus").textContent = camError(err); }
-    }
-  });
+  showCamCard(true);
+  if (camSetup) return; camSetup = true;
+  camFlip(camFacing);
+  $("camFacing").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) camFlip(b.dataset.facing); });
+  $("camCode").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnCamGo").click(); });
+  $("camBarFlip").onclick = () => { camFlip(); showCamBar(); };
+  $("camBarStop").onclick = () => camStop();
+  $("camBarHide").onclick = hideCamBar;
+  $("camChip").onclick = showCamBar;
+  $("btnCamBack").onclick = () => {
+    camStop("");
+    if (pairParam !== null) { location.href = location.pathname; return; }   // 從 QR 進來的 → 回到一般首頁
+    $("camMode").classList.add("hidden"); $("start").classList.remove("hidden");
+    $("dock").classList.remove("hidden"); document.querySelector(".topbar").classList.remove("hidden");
+  };
+  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (camLink) sendCamInfo(); }, 300); });
   $("btnCamGo").onclick = async () => {
+    if (camLink) { camStop(); return; }
     const code = $("camCode").value.replace(/\D/g, "");
-    if (camLink) { camLink.close(); camLink = null; camStream?.getTracks().forEach((t) => t.stop()); camStream = null;
-      $("btnCamGo").textContent = "開始傳送"; document.querySelector(".cam-ui").classList.remove("live"); $("camStatus").textContent = "已停止"; releaseWake(); return; }
-    if (code.length !== 6) { $("camStatus").textContent = "請輸入電腦畫面上的 6 位數配對碼"; return; }
+    if (code.length !== 6) { camSay("請輸入電腦畫面上的 6 位數配對碼"); $("camCode").focus(); return; }
     $("btnCamGo").disabled = true;
     try {
-      $("camStatus").textContent = "開啟鏡頭中…";
+      camSay("開啟鏡頭中…");
       camStream = await getCam(camFacing);
-      sv.srcObject = camStream; await sv.play().catch(() => {});
-      $("camStatus").textContent = "連線到電腦中…";
-      camLink = await joinRoom(code, camStream, { onState: (s) => {
-        $("camStatus").textContent = { calling: "連線到電腦中…", connected: "● 傳送中 — 請把手機橫放立好", closed: "連線中斷，請再按一次開始", notfound: "找不到這個配對碼，請確認電腦上的號碼", error: "連線發生錯誤" }[s] || s;
-      } });
+      $("camSend").srcObject = camStream; await $("camSend").play().catch(() => {});
+      camSay("連線到電腦中…");
+      camLink = await joinRoom(code, camStream, {
+        onOpen: sendCamInfo,
+        onData: (d) => { if (d?.type === "flip") { camFlip(); showCamBar(); } },
+        onState: (s) => {
+          if (s === "connected") { showCamCard(false); showCamBar(); sendCamInfo(); }
+          else if (s === "calling") camSay("連線到電腦中…");
+          else camStop({ closed: "連線中斷，請再按一次開始傳送", notfound: "找不到這個配對碼，請確認電腦上的號碼", error: "連線發生錯誤，請再試一次" }[s] || s);
+        },
+      });
       $("btnCamGo").textContent = "停止傳送";
-      document.querySelector(".cam-ui").classList.add("live");
       requestWake();
-    } catch (e) { $("camStatus").textContent = camError(e); camStream?.getTracks().forEach((t) => t.stop()); camStream = null; }
+    } catch (e) { camStop(camError(e)); }
     finally { $("btnCamGo").disabled = false; }
   };
 }
+$("btnJoinCam").onclick = () => setupCamMode();
 
 /* ---------------- 螢幕常亮 ---------------- */
 let wake = null;
@@ -371,12 +513,12 @@ const ov = $("overlay"), octx = ov.getContext("2d");
 const BONES = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [24, 26], [26, 28], [27, 31], [28, 32]];
 const HB = [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [5, 9], [9, 10], [10, 11], [11, 12], [9, 13], [13, 14], [14, 15], [15, 16], [13, 17], [0, 17], [17, 18], [18, 19], [19, 20]];
 function clearOverlay() { octx.clearRect(0, 0, ov.width, ov.height); }
-function drawOverlay(f) {
+function drawOverlay(f, src) {
   const w = ov.clientWidth, h = ov.clientHeight, dpr = Math.min(devicePixelRatio, 2);
   if (ov.width !== Math.round(w * dpr)) { ov.width = Math.round(w * dpr); ov.height = Math.round(h * dpr); }
   octx.setTransform(dpr, 0, 0, dpr, 0, 0); octx.clearRect(0, 0, w, h);
   if (!S.showSkel || !f) return;
-  const vw = video.videoWidth || 4, vh = video.videoHeight || 3, s = Math.max(w / vw, h / vh), ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;
+  const vw = src?.w || 4, vh = src?.h || 3, s = Math.min(w / vw, h / vh), ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;   // object-fit: contain
   const P = (p) => [ox + p.x * vw * s, oy + p.y * vh * s];
   const line = (pts, pairs, color, width) => {
     octx.strokeStyle = color; octx.lineWidth = width; octx.beginPath();
@@ -393,7 +535,10 @@ function loop() {
   if (window.__mocapPause) return;   // 測試用：暫停主迴圈
   let frame = null;
   if (running && !video.paused) {
-    try { frame = tracker.detect(video); } catch (e) { console.warn(e); }
+    try { updateAutoRot(); } catch (e) { console.warn(e); }
+    const src = sourceFrame();
+    if (src) layoutPip(src.w, src.h, src.rot);
+    try { if (src) frame = tracker.detect(src.el, src.w, src.h); } catch (e) { console.warn(e); }
     if (frame) {
       lastFrame = frame; fpsN++;
       if (frame.pose) { if (noPersonSince) pill("ok", "追蹤中"); noPersonSince = 0; }
@@ -404,7 +549,7 @@ function loop() {
           toast(S.mode === "upper" ? "沒有偵測到人：請讓頭和肩膀入鏡，並增加正面照明" : "沒有偵測到人：請退後讓全身入鏡", { ms: 4000 }); }
       }
     }
-    if (S.showPip) drawOverlay(frame || lastFrame);
+    if (S.showPip || S.split) drawOverlay(frame || lastFrame, src);
   }
   const now = performance.now();
   if (now - fpsT > 1000) { $("fps").textContent = running ? `${Math.round(fpsN * 1000 / (now - fpsT))} fps` : "—"; fpsN = 0; fpsT = now; }
@@ -444,4 +589,6 @@ else loadModel(S.model, { silent: true });
 requestAnimationFrame(loop);
 
 // 供測試使用
-window.__mocap = { S, stage, tracker, loadModel, setMode, syncUI, get running() { return running; }, set running(v) { running = v; } };
+window.__mocap = { S, stage, tracker, loadModel, setMode, syncUI, get running() { return running; }, set running(v) { running = v; },
+  get autoRot() { return autoRot; }, curRot, setRemoteInfo(d) { remoteInfo = d; resetAutoRot(); },
+  async testStream(s, info) { stopStream(); S.src = "phone"; remoteInfo = info || null; resetAutoRot(); stream = s; video.srcObject = s; await video.play(); await beginTracking(); } };

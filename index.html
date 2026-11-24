@@ -30,8 +30,13 @@
 <!-- ============ 鏡頭小畫面 ============ -->
 <div id="pip" class="pip hidden" aria-label="鏡頭畫面">
   <video id="cam" playsinline muted autoplay></video>
+  <canvas id="srcCanvas" class="hidden"></canvas>
   <canvas id="overlay"></canvas>
-  <button class="pip-toggle" id="pipToggle" title="縮小/放大鏡頭畫面" aria-label="縮小/放大鏡頭畫面">
+  <span class="pip-info" id="pipInfo"></span>
+  <button class="pip-btn pip-rot" id="pipRotate" title="畫面方向不對？點這裡旋轉 90°" aria-label="旋轉畫面 90 度">
+    <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+  </button>
+  <button class="pip-btn" id="pipToggle" title="縮小/放大鏡頭畫面" aria-label="縮小/放大鏡頭畫面">
     <svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
   </button>
 </div>
@@ -55,6 +60,9 @@
   <button class="dk" id="btnView" title="重設視角（也可以用手指拖曳/縮放）">
     <svg viewBox="0 0 24 24"><path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5"/><circle cx="12" cy="12" r="3"/></svg>
     <span>視角</span></button>
+  <button class="dk wide-only" id="btnSplit" title="分割畫面：左邊角色、右邊鏡頭">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/></svg>
+    <span>分割</span></button>
   <button class="dk" data-sheet="sheetSettings" title="設定">
     <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
     <span>設定</span></button>
@@ -71,6 +79,11 @@
     <label class="row"><span><b>臉部表情</b><small>眨眼、嘴型、頭部轉動</small></span><input type="checkbox" id="optFace" class="sw"></label>
     <label class="row"><span><b>手指</b><small>握拳、比手勢</small></span><input type="checkbox" id="optHands" class="sw"></label>
     <label class="row"><span><b>鏡像動作</b><small>開啟：角色像照鏡子一樣跟你同一邊動</small></span><input type="checkbox" id="optMirror" class="sw"></label>
+    <div class="row col"><span><b>畫面旋轉</b><small id="rotHint">自動：依手機直放／橫放與畫面中的人自動轉正</small></span>
+      <div class="seg wide" id="segRot">
+        <button data-rot="auto">自動</button><button data-rot="0">0°</button><button data-rot="90">90°</button><button data-rot="180">180°</button><button data-rot="270">270°</button>
+      </div>
+    </div>
     <div class="row col"><span><b>效能</b><small id="tierHint"></small></span>
       <div class="seg wide" id="segTier">
         <button data-tier="low">省電</button><button data-tier="mid">平衡</button><button data-tier="high">高品質</button>
@@ -79,7 +92,8 @@
     <div class="row col"><span><b>動作平滑</b><small>越往右越穩，但反應會慢一點</small></span>
       <input type="range" id="optSmooth" min="0" max="100" step="1"></div>
     <h3>畫面</h3>
-    <label class="row"><span><b>顯示鏡頭畫面</b></span><input type="checkbox" id="optPip" class="sw"></label>
+    <label class="row"><span><b>分割畫面</b><small>左邊虛擬角色、右邊實際鏡頭（直立螢幕為上下）</small></span><input type="checkbox" id="optSplit" class="sw"></label>
+    <label class="row"><span><b>顯示鏡頭畫面</b><small>右上角小畫面</small></span><input type="checkbox" id="optPip" class="sw"></label>
     <label class="row"><span><b>顯示骨架線</b></span><input type="checkbox" id="optSkel" class="sw"></label>
     <h3>關於</h3>
     <p class="about">版本 <span id="verTxt"></span><br>
@@ -154,6 +168,11 @@
 
     <button class="btn primary big" id="btnGo">開始</button>
     <p class="status" id="startStatus" aria-live="polite"></p>
+    <button class="join-cam" id="btnJoinCam">
+      <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      <span><b>這支手機／平板要當電腦的鏡頭</b><small>輸入電腦畫面上的 6 碼配對碼</small></span>
+      <svg viewBox="0 0 24 24" class="chev"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
     <p class="fine">影像只在你的裝置上計算，不會上傳。第一次使用需下載約 15～25MB 的 AI 模型。</p>
   </div>
 </div>
@@ -165,7 +184,7 @@
     <div class="pair-grid">
       <div id="qr" class="qr" aria-label="配對 QR code"></div>
       <div>
-        <p>1. 手機開相機掃左邊的 QR code<br>　 （或用手機瀏覽器開啟下方網址並輸入配對碼）</p>
+        <p>1. 手機開相機掃左邊的 QR code<br>　 或用手機瀏覽器打開下方網址，點最下面的「這支手機／平板要當電腦的鏡頭」</p>
         <p class="url" id="pairUrl"></p>
         <p>2. 配對碼</p>
         <div class="code" id="pairCode">------</div>
@@ -180,8 +199,18 @@
 <!-- ============ 手機端：鏡頭模式 ============ -->
 <div id="camMode" class="overlay hidden">
   <video id="camSend" playsinline muted autoplay></video>
-  <div class="cam-ui">
+  <!-- 傳送中：只留頂端一條細列，3 秒後自動收成角落小圓點 -->
+  <div class="cam-bar hidden" id="camBar" role="status">
+    <span class="dot"></span><span class="txt" id="camBarTxt">傳送中</span>
+    <button id="camBarFlip">換鏡頭</button>
+    <button id="camBarStop" class="stop">停止</button>
+    <button id="camBarHide" aria-label="收起">
+      <svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+  </div>
+  <button class="cam-chip hidden" id="camChip" aria-label="顯示控制列"><span class="dot"></span>傳送中</button>
+  <div class="cam-ui" id="camUi">
     <div class="card cam-card">
+      <button class="back" id="btnCamBack">‹ 返回</button>
       <h2>手機鏡頭模式</h2>
       <label class="field">電腦上顯示的配對碼
         <input id="camCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6 位數字" autocomplete="off"></label>
@@ -190,7 +219,7 @@
       </div>
       <button class="btn primary big" id="btnCamGo">開始傳送</button>
       <p class="status" id="camStatus" aria-live="polite"></p>
-      <p class="fine">傳送時請保持這個畫面開著、不要鎖定螢幕。</p>
+      <p class="fine">直放、橫放都可以，電腦會自動轉正。傳送時請保持這個畫面開著、不要鎖定螢幕。</p>
     </div>
   </div>
 </div>

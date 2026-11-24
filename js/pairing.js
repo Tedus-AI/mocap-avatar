@@ -12,7 +12,7 @@ function withTimeout(p, ms, label) {
 export const randomCode = () => String(Math.floor(100000 + Math.random() * 900000));
 
 /** 電腦端：開一個房間等手機連線。onStream(stream) 收到畫面 */
-export async function hostRoom({ onStream, onState }) {
+export async function hostRoom({ onStream, onState, onData }) {
   for (let attempt = 0; attempt < 3; attempt++) {
     const code = randomCode();
     const peer = new (Peer())(PREFIX + code, { debug: 1 });
@@ -26,21 +26,29 @@ export async function hostRoom({ onStream, onState }) {
       if (String(e?.type) === "unavailable-id") continue;   // 號碼撞到，換一個
       throw e;
     }
+    const room = { code, peer, conn: null, connected: false,
+      send(msg) { try { if (room.conn?.open) room.conn.send(msg); } catch (e) {} },
+      close: () => peer.destroy() };
     peer.on("call", (call) => {
       onState?.("connecting");
       call.answer();
-      call.on("stream", (s) => { onState?.("connected"); onStream(s); });
-      call.on("close", () => onState?.("closed"));
-      call.on("error", () => onState?.("closed"));
+      call.on("stream", (s) => { room.connected = true; onState?.("connected"); onStream(s); });
+      call.on("close", () => { room.connected = false; onState?.("closed"); });
+      call.on("error", () => { room.connected = false; onState?.("closed"); });
+    });
+    // 資料通道：手機回報方向／鏡頭，電腦可要求手機換鏡頭
+    peer.on("connection", (conn) => {
+      room.conn = conn;
+      conn.on("data", (d) => onData?.(d));
     });
     peer.on("disconnected", () => { try { peer.reconnect(); } catch (e) {} });
-    return { code, peer, close: () => peer.destroy() };
+    return room;
   }
   throw new Error("配對號碼建立失敗，請重試");
 }
 
 /** 手機端：連到電腦的房間並送出鏡頭畫面 */
-export async function joinRoom(code, stream, { onState }) {
+export async function joinRoom(code, stream, { onState, onData, onOpen }) {
   const peer = new (Peer())({ debug: 1 });
   await withTimeout(new Promise((res, rej) => { peer.on("open", res); peer.on("error", rej); }), 12000, "連不上配對伺服器（請確認網路）");
   onState?.("calling");
@@ -54,8 +62,12 @@ export async function joinRoom(code, stream, { onState }) {
     if (pc.connectionState === "connected") onState?.("connected");
     if (["failed", "disconnected"].includes(pc.connectionState)) onState?.("closed");
   });
+  const conn = peer.connect(PREFIX + code, { reliable: true });
+  conn.on("open", () => onOpen?.());
+  conn.on("data", (d) => onData?.(d));
   return {
-    peer, call,
+    peer, call, conn,
+    send(msg) { try { if (conn.open) conn.send(msg); } catch (e) {} },
     /** 換鏡頭時直接替換影像軌，不用重新配對 */
     replaceTrack(track) {
       const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === "video");

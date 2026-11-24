@@ -42,12 +42,30 @@ svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.7;stroke
 /* ---------- 鏡頭小畫面 ---------- */
 .pip{position:fixed;z-index:4;right:calc(12px + var(--sar));top:calc(58px + var(--sat));width:240px;aspect-ratio:4/3;
   border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#000;box-shadow:0 8px 24px rgba(0,0,0,.4);transition:width .2s}
-.pip video,.pip canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.pip video,.pip canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 .pip.mirror video,.pip.mirror canvas{transform:scaleX(-1)}
 .pip.small{width:120px}
-.pip-toggle{position:absolute;right:6px;top:6px;width:30px;height:30px;border-radius:8px;border:0;background:rgba(0,0,0,.5);display:grid;place-items:center}
-.pip-toggle svg{width:16px;height:16px}
-.pip.novideo video{opacity:0}
+.pip-btn{position:absolute;right:6px;top:6px;width:30px;height:30px;border-radius:8px;border:0;background:rgba(0,0,0,.55);display:grid;place-items:center;z-index:2}
+.pip-btn svg{width:16px;height:16px}
+.pip-rot{right:40px}
+.pip.small .pip-rot{display:none}
+.pip-info{position:absolute;left:6px;bottom:5px;font-size:10px;color:#fff;background:rgba(0,0,0,.5);padding:2px 6px;border-radius:6px;z-index:2;pointer-events:none}
+.pip.small .pip-info{display:none}
+
+/* ---------- 分割畫面：左角色／右鏡頭（直立螢幕：上角色／下鏡頭） ---------- */
+body.split #stage{width:50%}
+body.split .pip{left:50%;right:0;top:0;bottom:0;width:auto!important;aspect-ratio:auto!important;border-radius:0;border:0;
+  border-left:1px solid var(--line);box-shadow:none;background:#05070a}
+body.split #pipToggle{display:none}
+body.split .pip-info{left:10px;bottom:auto;top:calc(54px + var(--sat));font-size:12px}
+body.split .pip-rot{top:calc(50px + var(--sat));right:10px}
+@media (min-width:561px) and (min-height:501px) and (orientation:landscape){ body.split .dock{left:25%} }
+@media (orientation:portrait){
+  body.split #stage{width:100%;height:50%}
+  body.split .pip{left:0;top:50%;border-left:0;border-top:1px solid var(--line)}
+  body.split .pip-info{top:10px} body.split .pip-rot{top:8px}
+}
+@media (max-width:560px){ .dk.wide-only{display:none} }
 
 /* ---------- 底部操作列 ---------- */
 .dock{position:fixed;z-index:6;left:50%;transform:translateX(-50%);bottom:calc(12px + var(--sab));
@@ -143,14 +161,29 @@ input[type=range]{width:100%;accent-color:var(--accent);height:28px}
 .url{font-family:ui-monospace,Consolas,monospace;font-size:12px!important;word-break:break-all;color:var(--text)!important}
 .code{font-size:40px;font-weight:800;letter-spacing:.18em;color:var(--accent);font-variant-numeric:tabular-nums}
 
+.join-cam{display:flex;align-items:center;gap:12px;width:100%;margin-top:16px;padding:13px 14px;border-radius:14px;text-align:left;
+  border:1.5px dashed rgba(95,224,194,.45);background:rgba(95,224,194,.06)}
+.join-cam svg{width:26px;height:26px;color:var(--accent);flex:none}
+.join-cam span{flex:1;display:flex;flex-direction:column;gap:2px}
+.join-cam small{color:var(--muted);font-size:12px}
+.join-cam .chev{width:18px;height:18px;color:var(--muted)}
+.back{border:0;background:transparent;color:var(--muted);padding:0 0 8px;font-size:14px}
+
+/* 手機傳送中的細控制列 */
+.cam-bar{position:absolute;z-index:3;top:calc(8px + var(--sat));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;
+  padding:6px 6px 6px 12px;border-radius:999px;background:rgba(15,18,24,.78);border:1px solid var(--line);backdrop-filter:blur(10px);
+  max-width:calc(100vw - 16px);white-space:nowrap}
+.cam-bar .txt{font-size:13px;overflow:hidden;text-overflow:ellipsis;max-width:46vw}
+.cam-bar button{border:0;border-radius:999px;padding:7px 11px;font-size:13px;background:rgba(255,255,255,.1)}
+.cam-bar button.stop{background:rgba(255,255,255,.18)}
+.cam-bar button svg{width:16px;height:16px;display:block}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px var(--accent);animation:pulse 1.6s infinite;flex:none}
+.cam-chip{position:absolute;z-index:3;top:calc(10px + var(--sat));right:calc(10px + var(--sar));display:flex;align-items:center;gap:6px;
+  border:1px solid var(--line);border-radius:999px;padding:6px 11px;font-size:12px;background:rgba(15,18,24,.6);color:var(--text)}
 #camMode{padding:0;background:#000}
 #camSend{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
 #camSend.mirror{transform:scaleX(-1)}
 .cam-ui{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:16px}
-.cam-ui.live{align-items:flex-end;pointer-events:none}
-.cam-ui.live .card{pointer-events:auto;max-width:420px;padding:12px 16px;background:rgba(22,27,36,.8)}
-.cam-ui.live .field,.cam-ui.live h2,.cam-ui.live .fine{display:none}
-.cam-ui.live .btn.big{margin-top:8px;padding:10px}
 .field{display:flex;flex-direction:column;gap:6px;font-size:14px;color:var(--muted);margin:10px 0}
 .field input{font-size:28px;letter-spacing:.3em;text-align:center;padding:10px;border-radius:12px;border:1px solid var(--line);
   background:#0d1016;color:var(--text);font-variant-numeric:tabular-nums}
