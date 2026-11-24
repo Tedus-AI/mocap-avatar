@@ -564,6 +564,9 @@ function drawOverlay(f, src) {
 function loop() {
   requestAnimationFrame(loop);
   if (window.__mocapPause) return;   // 測試用：暫停主迴圈
+  step();
+}
+function step() {
   let frame = null;
   if (running && !video.paused) {
     try { updateAutoRot(); } catch (e) { console.warn(e); }
@@ -620,6 +623,6 @@ else loadModel(S.model, { silent: true });
 requestAnimationFrame(loop);
 
 // 供測試使用
-window.__mocap = { S, stage, tracker, loadModel, setMode, syncUI, get running() { return running; }, set running(v) { running = v; },
+window.__mocap = { S, stage, tracker, loadModel, setMode, syncUI, step, get running() { return running; }, set running(v) { running = v; },
   get autoRot() { return autoRot; }, curRot, setRemoteInfo(d) { remoteInfo = d; resetAutoRot(); },
   async testStream(s, info) { stopStream(); S.src = "phone"; remoteInfo = info || null; resetAutoRot(); stream = s; video.srcObject = s; await video.play(); await beginTracking(); } };
