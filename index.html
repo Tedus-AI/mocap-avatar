@@ -79,6 +79,11 @@
     <label class="row"><span><b>臉部表情</b><small>眨眼、嘴型、頭部轉動</small></span><input type="checkbox" id="optFace" class="sw"></label>
     <label class="row"><span><b>手指</b><small>握拳、比手勢</small></span><input type="checkbox" id="optHands" class="sw"></label>
     <label class="row"><span><b>鏡像動作</b><small>開啟：角色像照鏡子一樣跟你同一邊動</small></span><input type="checkbox" id="optMirror" class="sw"></label>
+    <div class="row col"><span><b>鏡頭畫面數</b><small>60fps 快速動作比較抓得到，但比較耗電；手機當鏡頭時也會套用到手機</small></span>
+      <div class="seg wide" id="segFps"><button data-fps="60">60 fps</button><button data-fps="30">30 fps</button></div>
+    </div>
+    <label class="row"><span><b>鎖定主角</b><small>畫面中有別人、海報或人形物品時，只追蹤鎖定的那個人</small></span><input type="checkbox" id="optLock" class="sw"></label>
+    <button class="btn ghost" id="btnRelock">重新鎖定主角（換人或抓錯人時按）</button>
     <div class="row col"><span><b>畫面旋轉</b><small id="rotHint">自動：依手機直放／橫放與畫面中的人自動轉正</small></span>
       <div class="seg wide" id="segRot">
         <button data-rot="auto">自動</button><button data-rot="0">0°</button><button data-rot="90">90°</button><button data-rot="180">180°</button><button data-rot="270">270°</button>

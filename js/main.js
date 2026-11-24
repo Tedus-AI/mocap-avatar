@@ -21,6 +21,8 @@ const DEFAULTS = {
   showPip: true, showSkel: true, bg: "studio", model: DEFAULT_MODEL,
   rot: "auto",          // 畫面旋轉："auto" 或 0/90/180/270
   split: false,         // 分割畫面：左角色／右鏡頭
+  camFps: 60,           // 鏡頭畫面數
+  lockOn: true,         // 鎖定主角
 };
 const S = { ...DEFAULTS };
 function load() {
@@ -57,6 +59,14 @@ let stream = null, running = false, host = null, fileUrl = null;
 let lastFrame = null, noPersonSince = 0, fpsN = 0, fpsT = performance.now();
 let modelBusy = false;
 let pipKey = "";   // 小畫面版面快取鍵（resize 時清空）
+let lastVT = -1, lastSrc = null, camN = 0, camFpsNow = 0;
+// 新畫面偵測：requestVideoFrameCallback 每來一張鏡頭畫面觸發一次（最準）；沒觸發時退回比對 currentTime
+let vfcFlag = false, vfcLast = 0;
+function armVFC() {
+  if (!HTMLVideoElement.prototype.requestVideoFrameCallback) return;
+  video.requestVideoFrameCallback(() => { vfcFlag = true; vfcLast = performance.now(); camN++; armVFC(); });
+}
+armVFC();
 
 function resize() { const r = canvas.getBoundingClientRect(); stage.resize(Math.max(1, r.width), Math.max(1, r.height)); pipKey = ""; }
 window.addEventListener("resize", resize);
@@ -193,6 +203,8 @@ function syncUI() {
   $("pip").classList.toggle("mirror", S.mirror);
   $("btnFlip").disabled = !(running && (S.src === "local" || S.src === "phone"));
   $$("#segRot button").forEach((b) => b.classList.toggle("on", b.dataset.rot === String(S.rot)));
+  $$("#segFps button").forEach((b) => b.classList.toggle("on", +b.dataset.fps === S.camFps));
+  $("optLock").checked = S.lockOn;
   $("verTxt").textContent = IS_DEV ? "開發版" : VERSION;
 }
 function setMode(m) { S.mode = m; save(); stage.frame(m); syncUI(); }
@@ -203,6 +215,14 @@ $("optMirror").onchange = (e) => { S.mirror = e.target.checked; save(); syncUI()
 $("optPip").onchange = (e) => { S.showPip = e.target.checked; save(); syncUI(); };
 function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(S.mode, true); }
 $("optSplit").onchange = (e) => setSplit(e.target.checked);
+$("optLock").onchange = (e) => { S.lockOn = e.target.checked; tracker.lockOn = S.lockOn; tracker.relock(); save(); };
+$("btnRelock").onclick = () => { tracker.relock(); toast("已重新鎖定：會追蹤畫面中最大（最靠近鏡頭）的人"); };
+$("segFps").addEventListener("click", async (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  S.camFps = +b.dataset.fps; save(); syncUI();
+  if (running && S.src === "local") { try { await startCamera(); toast(`鏡頭改為 ${S.camFps}fps`); } catch (err) { toast(camError(err), { err: true }); } }
+  if (S.src === "phone" && host?.conn?.open) { host.send({ type: "fps", fps: S.camFps }); toast(`已請手機改為 ${S.camFps}fps`); }
+});
 $("btnSplit").onclick = () => setSplit(!S.split);
 $("optSkel").onchange = (e) => { S.showSkel = e.target.checked; save(); clearOverlay(); };
 $("optSmooth").oninput = (e) => { S.smooth = +e.target.value; tracker.setSmooth(S.smooth); save(); };
@@ -251,12 +271,12 @@ function camError(e) {
   if (n === "NotReadableError") return "鏡頭被其他 App 佔用中，請先關掉其他使用相機的程式。";
   return e?.message || String(e);
 }
-async function getCam(facing) {
+async function getCam(facing, fps = S.camFps) {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error("這個瀏覽器不支援鏡頭（需要 HTTPS 網址）");
   // 直放時要直向畫面（全身才拍得到腳）
   const portrait = innerHeight > innerWidth && navigator.maxTouchPoints > 0;
   return navigator.mediaDevices.getUserMedia({ audio: false,
-    video: { facingMode: { ideal: facing }, width: { ideal: portrait ? 720 : 1280 }, height: { ideal: portrait ? 1280 : 720 }, frameRate: { ideal: 30, max: 30 } } });
+    video: { facingMode: { ideal: facing }, width: { ideal: portrait ? 720 : 1280 }, height: { ideal: portrait ? 1280 : 720 }, frameRate: { ideal: fps, max: fps } } });
 }
 
 /* ---------------- 畫面旋轉：手機直放但傳來的影像沒轉正時，自動轉回來 ---------------- */
@@ -339,9 +359,9 @@ function layoutPip(w, h, rot) {
   const p = $("pip"), small = p.classList.contains("small");
   const key = `${w}x${h}|${small}|${innerWidth}x${innerHeight}|${rot}|${S.split}|${S.rot}`;
   if (key === pipKey) return; pipKey = key;
-  $("cam").classList.toggle("hidden", !!rot);
+  $("cam").style.opacity = rot ? 0 : 1;   // 不用 display:none，確保瀏覽器持續解碼並回報新畫面
   srcCanvas.classList.toggle("hidden", !rot);
-  $("pipInfo").textContent = `${h > w ? "直向" : "橫向"} ${w}×${h}${rot ? `・${S.rot === "auto" ? "自動" : "手動"}轉 ${rot}°` : ""}`;
+  $("pipInfo").textContent = `${h > w ? "直向" : "橫向"} ${w}×${h}・${camFpsNow || "—"}fps${rot ? `・${S.rot === "auto" ? "自動" : "手動"}轉 ${rot}°` : ""}`;
   if (S.split) { p.style.width = ""; p.style.aspectRatio = ""; return; }   // 分割畫面：交給 CSS
   const phone = matchMedia("(max-width:560px)").matches;
   const low = matchMedia("(max-height:500px) and (orientation:landscape)").matches;
@@ -418,7 +438,8 @@ async function startPairing() {
       onStream: async (s) => {
         stream = s; video.srcObject = s; video.muted = true;
         try { await video.play(); } catch (e) {}
-        S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; S.rot = "auto"; save(); resetAutoRot();
+        S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; S.rot = "auto"; save(); resetAutoRot(); tracker.relock();
+        setTimeout(() => host?.send({ type: "fps", fps: S.camFps }), 500);
         if (!running) { try { await beginTracking(); } catch (e) { $("pairStatus").textContent = e.message; } }
         else { pill("warn", "尋找人物中…"); toast("手機重新連上了"); }
       },
@@ -476,6 +497,7 @@ async function camFlip(to) {
   try {
     const ns = await getCam(camFacing);
     await camLink?.replaceTrack(ns.getVideoTracks()[0]);
+    camLink?.tuneSender?.(S.camFps);
     camStream.getTracks().forEach((t) => t.stop()); camStream = ns; $("camSend").srcObject = ns;
     sendCamInfo();
   } catch (err) { camSay(camError(err)); showCamCard(true); }
@@ -518,7 +540,11 @@ function setupCamMode() {
       camSay("連線到電腦中…");
       camLink = await joinRoom(code, camStream, {
         onOpen: sendCamInfo,
-        onData: (d) => { if (d?.type === "flip") { camFlip(); showCamBar(); } },
+        onData: (d) => {
+          if (d?.type === "flip") { camFlip(); showCamBar(); }
+          if (d?.type === "fps" && d.fps !== S.camFps) { S.camFps = d.fps; save(); camFlip(camFacing); }   // 用新的 fps 重新開鏡頭
+        },
+        fps: S.camFps,
         onState: (s) => {
           if (s === "connected") { showCamCard(false); showCamBar(); sendCamInfo(); }
           else if (s === "calling") camSay("連線到電腦中…");
@@ -570,8 +596,11 @@ function step() {
   let frame = null;
   if (running && !video.paused) {
     try { updateAutoRot(); } catch (e) { console.warn(e); }
-    const src = sourceFrame();
-    if (src) layoutPip(src.w, src.h, src.rot);
+    const vt = video.currentTime;
+    const vfcAlive = performance.now() - vfcLast < 250;
+    const fresh = vfcAlive ? vfcFlag : vt !== lastVT;   // 只在鏡頭有新畫面時才偵測，不重複算同一張
+    const src = fresh ? sourceFrame() : null;
+    if (src) { vfcFlag = false; lastVT = vt; if (!vfcAlive) camN++; layoutPip(src.w, src.h, src.rot); lastSrc = src; }
     try { if (src) frame = tracker.detect(src.el, src.w, src.h); } catch (e) { console.warn(e); }
     if (frame) {
       lastFrame = frame; fpsN++;
@@ -583,10 +612,15 @@ function step() {
           toast(S.mode === "upper" ? "沒有偵測到人：請讓頭和肩膀入鏡，並增加正面照明" : "沒有偵測到人：請退後讓全身入鏡", { ms: 4000 }); }
       }
     }
-    if (S.showPip || S.split) drawOverlay(frame || lastFrame, src);
+    if (fresh && (S.showPip || S.split)) drawOverlay(frame || lastFrame, src || lastSrc);
   }
   const now = performance.now();
-  if (now - fpsT > 1000) { $("fps").textContent = running ? `${Math.round(fpsN * 1000 / (now - fpsT))} fps` : "—"; fpsN = 0; fpsT = now; }
+  if (now - fpsT > 1000) {
+    const k = 1000 / (now - fpsT);
+    $("fps").textContent = running ? `${Math.round(fpsN * k)} fps` : "—";
+    camFpsNow = Math.round(camN * k); pipKey = "";   // 讓小畫面資訊更新鏡頭 fps
+    fpsN = 0; camN = 0; fpsT = now;
+  }
   stage.update(running ? frame || lastFrame : null, {
     mirror: S.mirror, fullBody: S.mode === "full", useHands: S.useHands, useFace: S.useFace,
     responsiveness: 14 + (100 - S.smooth) * 0.3,   // 去抖動主要交給 One Euro，骨頭這層只做輕微平滑
@@ -617,7 +651,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) chec
 setInterval(checkVersion, 5 * 60 * 1000);
 
 /* ---------------- 啟動 ---------------- */
-applyBg(); syncUI(); tracker.setSmooth(S.smooth);
+applyBg(); syncUI(); tracker.setSmooth(S.smooth); tracker.lockOn = S.lockOn;
 if (pairParam !== null) setupCamMode();
 else loadModel(S.model, { silent: true });
 requestAnimationFrame(loop);

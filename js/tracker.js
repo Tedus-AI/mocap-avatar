@@ -42,6 +42,7 @@ export class Tracker {
     this.n = 0; this.lastTs = 0;
     this.last = { pose: null, hands: {}, face: null };
     this.delegate = "GPU";
+    this.lockOn = true; this.lock = null;   // 鎖定主角：{c:[x,y], s, t}
     // One Euro 濾波：身體（世界座標＋畫面座標）、左右手
     this.fWorld = new LandmarkFilter(); this.fLm = new LandmarkFilter();
     this.fHand = { L: [new LandmarkFilter(), new LandmarkFilter()], R: [new LandmarkFilter(), new LandmarkFilter()] };
@@ -78,15 +79,16 @@ export class Tracker {
     await this._lib();
     const V = this.vision, fs = this.fileset;
     const poseModel = TIERS[tier].pose;
-    if (!this.pose || this._poseModel !== poseModel) {
+    const numPoses = tier === "low" ? 1 : 2;   // 手機省電：只偵測 1 人，靠「跳動排除」鎖定；其他：偵測 2 人挑主角
+    if (!this.pose || this._poseModel !== poseModel || this._numPoses !== numPoses) {
       onStep(`載入身體追蹤模型（${{ poseLite: "輕量", poseFull: "標準", poseHeavy: "高精度，約 30MB" }[poseModel]}）…`);
       this.pose?.close?.();
       this.pose = await this._create("身體", (d) => V.PoseLandmarker.createFromOptions(fs, {
         baseOptions: { modelAssetPath: MODELS[poseModel], delegate: d },
-        runningMode: "VIDEO", numPoses: 1,
+        runningMode: "VIDEO", numPoses,
         minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
       }));
-      this._poseModel = poseModel;
+      this._poseModel = poseModel; this._numPoses = numPoses;
     }
     if (useHands && !this.hand) {
       onStep("載入手部追蹤模型…");
@@ -100,7 +102,7 @@ export class Tracker {
       onStep("載入臉部追蹤模型…");
       this.face = await this._create("臉部", (d) => V.FaceLandmarker.createFromOptions(fs, {
         baseOptions: { modelAssetPath: MODELS.face, delegate: d },
-        runningMode: "VIDEO", numFaces: 1,
+        runningMode: "VIDEO", numFaces: 2,
         outputFaceBlendshapes: true, outputFacialTransformationMatrixes: true,
       }));
     }
@@ -125,7 +127,12 @@ export class Tracker {
 
     const pr = this.pose.detectForVideo(video, ts);
     const t = ts / 1000;
-    const pose = pr.landmarks?.length ? { lm: this.fLm.apply(pr.landmarks[0], t), world: this.fWorld.apply(pr.worldLandmarks[0], t) } : null;
+    const cands = (pr.landmarks || []).map((lm, i) => ({ lm, world: pr.worldLandmarks[i], ...torsoStats(lm, aspect) }));
+    const chosen = this._pickSubject(cands, t);
+    let pose;
+    if (chosen) pose = { lm: this.fLm.apply(chosen.lm, t), world: this.fWorld.apply(chosen.world, t) };
+    else if (this.last.pose && this.lock && t - this.lock.t < 0.6) pose = this.last.pose;   // 被排除的幀：短暫沿用上一個姿勢
+    else pose = null;
     this.last.pose = pose;
 
     if (this.useHands && this.hand && n % tier.handEvery === 0) {
@@ -140,13 +147,48 @@ export class Tracker {
     if (this.useFace && this.face && n % tier.faceEvery === 0) {
       const fr = this.face.detectForVideo(video, ts);
       if (fr.faceLandmarks?.length) {
+        // 有好幾張臉（海報、旁人）時，選鼻尖最接近主角身體鼻子的那張
+        let fi = 0;
+        if (fr.faceLandmarks.length > 1 && pose) {
+          const nx = pose.lm[0].x, ny = pose.lm[0].y;
+          let bd = Infinity;
+          fr.faceLandmarks.forEach((f, i) => { const d = Math.hypot(f[1].x - nx, f[1].y - ny); if (d < bd) { bd = d; fi = i; } });
+        }
         const blend = {};
-        for (const c of fr.faceBlendshapes?.[0]?.categories || []) blend[c.categoryName] = c.score;
-        this.last.face = { blend, matrix: fr.facialTransformationMatrixes?.[0]?.data, lm: fr.faceLandmarks[0] };
+        for (const c of fr.faceBlendshapes?.[fi]?.categories || []) blend[c.categoryName] = c.score;
+        this.last.face = { blend, matrix: fr.facialTransformationMatrixes?.[fi]?.data, lm: fr.faceLandmarks[fi] };
       } else this.last.face = null;
     }
     return { pose, hands: this.last.hands, face: this.useFace ? this.last.face : null, aspect };
   }
+
+  /** 鎖定主角：從候選人中挑出跟上一幀同一個人；突然跳很遠的視為抓錯，排除 */
+  _pickSubject(cands, t) {
+    if (!cands.length) return null;
+    if (!this.lockOn) return cands[0];
+    const L = this.lock;
+    const largest = () => cands.reduce((a, b) => (b.s > a.s ? b : a));
+    // 還沒鎖定，或已經 1.5 秒沒看到主角 → 鎖定畫面中最大（最近）的人
+    if (!L || t - L.t > 1.5) {
+      const c = largest(); this.lock = { c: c.c, s: c.s, t, jumps: 0 }; return c;
+    }
+    const dt = Math.max(0.001, t - L.t);
+    let best = null;
+    for (const c of cands) {
+      let d = Math.hypot(c.c[0] - L.c[0], c.c[1] - L.c[1]) / L.s;
+      const ratio = c.s / L.s; if (ratio > 1.6 || ratio < 0.6) d += 1;   // 大小突然變很多
+      if (!best || d < best.d) best = { ...c, d };
+    }
+    // 容許的移動量：基本 0.6 個身體大小，隔越久放寬（每秒 3 個），最多 1.5（避免旁邊的人搶走鎖定）
+    if (best.d <= 0.6 + Math.min(3 * dt, 0.9)) {
+      L.c = best.c;                       // 中心直接跟著主角（平滑會落後，快速動作時誤判）
+      L.s += (best.s - L.s) * 0.3; L.t = t;
+      return best;
+    }
+    this.rejected = (this.rejected || 0) + 1;
+    return null;
+  }
+  relock() { this.lock = null; }
 
   /** 只跑一次身體偵測，判斷人是不是「站正」的（自動判斷畫面旋轉用） */
   uprightScore(src) {
@@ -165,6 +207,14 @@ export class Tracker {
     // 頭在肩膀上方、肩膀在臀部上方 → 正
     return (shY - lm[0].y) + (hipY - shY) * 0.5;
   }
+}
+
+/** 軀幹中心與大小（畫面座標，x 乘上長寬比） */
+function torsoStats(lm, aspect) {
+  const sx = (lm[11].x + lm[12].x) / 2 * aspect, sy = (lm[11].y + lm[12].y) / 2;
+  const hx = (lm[23].x + lm[24].x) / 2 * aspect, hy = (lm[23].y + lm[24].y) / 2;
+  const sw = Math.hypot((lm[11].x - lm[12].x) * aspect, lm[11].y - lm[12].y);
+  return { c: [(sx + hx) / 2, (sy + hy) / 2], s: Math.max(Math.hypot(sx - hx, sy - hy), sw, 0.02) };
 }
 
 /** 把偵測到的手分配給「人的左手 L / 右手 R」：以手腕位置對 Pose 手腕最近者為準 */

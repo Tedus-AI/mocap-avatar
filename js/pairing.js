@@ -48,7 +48,7 @@ export async function hostRoom({ onStream, onState, onData }) {
 }
 
 /** 手機端：連到電腦的房間並送出鏡頭畫面 */
-export async function joinRoom(code, stream, { onState, onData, onOpen }) {
+export async function joinRoom(code, stream, { onState, onData, onOpen, fps: fpsWanted = 60 }) {
   const peer = new (Peer())({ debug: 1 });
   await withTimeout(new Promise((res, rej) => { peer.on("open", res); peer.on("error", rej); }), 12000, "連不上配對伺服器（請確認網路）");
   onState?.("calling");
@@ -58,15 +58,28 @@ export async function joinRoom(code, stream, { onState, onData, onOpen }) {
   call.on("close", () => onState?.("closed"));
   // 連線成功判斷：ICE 狀態
   const pc = call.peerConnection;
+  /** 要求 WebRTC 優先維持畫面數（網路不夠時降畫質、不降 fps） */
+  const tuneSender = async (fps = 60) => {
+    try {
+      const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === "video");
+      if (!sender) return;
+      const p = sender.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxFramerate = fps;
+      p.encodings[0].maxBitrate = 6_000_000;
+      p.degradationPreference = "maintain-framerate";
+      await sender.setParameters(p);
+    } catch (e) { console.warn("無法設定傳送參數", e); }
+  };
   pc?.addEventListener("connectionstatechange", () => {
-    if (pc.connectionState === "connected") onState?.("connected");
+    if (pc.connectionState === "connected") { onState?.("connected"); tuneSender(fpsWanted); }
     if (["failed", "disconnected"].includes(pc.connectionState)) onState?.("closed");
   });
   const conn = peer.connect(PREFIX + code, { reliable: true });
   conn.on("open", () => onOpen?.());
   conn.on("data", (d) => onData?.(d));
   return {
-    peer, call, conn,
+    peer, call, conn, tuneSender,
     send(msg) { try { if (conn.open) conn.send(msg); } catch (e) {} },
     /** 換鏡頭時直接替換影像軌，不用重新配對 */
     replaceTrack(track) {
