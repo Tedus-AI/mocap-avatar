@@ -54,8 +54,10 @@ export async function joinRoom(code, stream, { onState, onData, onOpen, fps: fps
   onState?.("calling");
   const call = peer.call(PREFIX + code, stream);
   if (!call) throw new Error("找不到這個配對碼，請確認電腦畫面上的號碼");
-  peer.on("error", (e) => onState?.(e?.type === "peer-unavailable" ? "notfound" : "error", e));
-  call.on("close", () => onState?.("closed"));
+  peer.on("error", (e) => fail(e?.type === "peer-unavailable" ? "notfound" : "error"));
+  let closed = false;
+  const fail = (why) => { if (!closed) { closed = true; onState?.(why); } };
+  call.on("close", () => fail("closed"));
   // 連線成功判斷：ICE 狀態
   const pc = call.peerConnection;
   /** 要求 WebRTC 優先維持畫面數（網路不夠時降畫質、不降 fps） */
@@ -72,8 +74,10 @@ export async function joinRoom(code, stream, { onState, onData, onOpen, fps: fps
     } catch (e) { console.warn("無法設定傳送參數", e); }
   };
   pc?.addEventListener("connectionstatechange", () => {
-    if (pc.connectionState === "connected") { onState?.("connected"); tuneSender(fpsWanted); }
-    if (["failed", "disconnected"].includes(pc.connectionState)) onState?.("closed");
+    const st = pc.connectionState;
+    if (st === "connected") { onState?.("connected"); tuneSender(fpsWanted); }
+    else if (st === "disconnected") onState?.("unstable");   // 暫時不穩：通常幾秒內自己恢復，不可直接斷掉
+    else if (st === "failed" || st === "closed") fail("closed");
   });
   const conn = peer.connect(PREFIX + code, { reliable: true });
   conn.on("open", () => onOpen?.());

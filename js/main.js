@@ -22,6 +22,7 @@ const DEFAULTS = {
   rot: "auto",          // 畫面旋轉："auto" 或 0/90/180/270
   split: false,         // 分割畫面：左角色／右鏡頭
   camFps: 60,           // 鏡頭畫面數
+  autoCal: true,        // 開始時引導校準
   lockOn: true,         // 鎖定主角
 };
 const S = { ...DEFAULTS };
@@ -105,7 +106,7 @@ async function loadModel(id, { silent = false } = {}) {
       pill("busy", `下載角色 ${m.name}（${m.mb}MB）…`);
       await stage.load(m.file + "?v=" + VERSION, (p) => pill("busy", `下載角色 ${m.name} ${Math.round(p * 100)}%`));
     }
-    S.model = id; save(); renderModels();
+    S.model = id; save(); renderModels(); applyCalibration();
     if (!silent) toast("已換成新角色");
   } catch (e) {
     console.error(e);
@@ -204,14 +205,18 @@ function syncUI() {
   $("btnFlip").disabled = !(running && (S.src === "local" || S.src === "phone"));
   $$("#segRot button").forEach((b) => b.classList.toggle("on", b.dataset.rot === String(S.rot)));
   $$("#segFps button").forEach((b) => b.classList.toggle("on", +b.dataset.fps === S.camFps));
-  $("optLock").checked = S.lockOn;
+  $("optLock").checked = S.lockOn; $("optAutoCal").checked = S.autoCal;
   $("verTxt").textContent = IS_DEV ? "開發版" : VERSION;
 }
 function setMode(m) { S.mode = m; save(); stage.frame(m); syncUI(); }
 $$(".dock .seg button, #startMode button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
 $$("#srcChoices .choice").forEach((b) => b.addEventListener("click", () => { S.src = b.dataset.src; save(); syncUI(); }));
 $$("#startFacing button").forEach((b) => b.addEventListener("click", () => { S.facing = b.dataset.facing; S.mirror = S.facing === "user"; save(); syncUI(); }));
-$("optMirror").onchange = (e) => { S.mirror = e.target.checked; save(); syncUI(); };
+$("optMirror").onchange = (e) => { S.mirror = e.target.checked; save(); syncUI(); applyCalibration(); };
+$("optAutoCal").onchange = (e) => { S.autoCal = e.target.checked; save(); };
+$("btnCal").onclick = () => { showSheet(null); startCalibration(); };
+$("pipCal").onclick = () => startCalibration();
+$("btnCalClear").onclick = () => { calData = null; stage.rig?.clearCalibration(); toast("已清除校準"); };
 $("optPip").onchange = (e) => { S.showPip = e.target.checked; save(); syncUI(); };
 function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(S.mode, true); }
 $("optSplit").onchange = (e) => setSplit(e.target.checked);
@@ -395,6 +400,7 @@ async function beginTracking() {
   stage.frame(S.mode); syncUI(); requestWake();
   pill("warn", "尋找人物中…");
   toast(S.mode === "upper" ? "坐在鏡頭前約 1 公尺，讓頭、肩膀和雙手入鏡" : "退到 2～3 公尺，讓全身入鏡", { ms: 5000 });
+  if (S.autoCal) startCalibration();
 }
 $("btnGo").onclick = async () => {
   const btn = $("btnGo"); btn.disabled = true;
@@ -441,7 +447,7 @@ async function startPairing() {
         S.mirror = remoteInfo ? remoteInfo.facing === "user" : S.mirror; S.rot = "auto"; save(); resetAutoRot(); tracker.relock();
         setTimeout(() => host?.send({ type: "fps", fps: S.camFps }), 500);
         if (!running) { try { await beginTracking(); } catch (e) { $("pairStatus").textContent = e.message; } }
-        else { pill("warn", "尋找人物中…"); toast("手機重新連上了"); }
+        else { pill("warn", "尋找人物中…"); toast("手機重新連上了"); if (S.autoCal) startCalibration(); }
       },
       onData: (d) => {
         if (d?.type !== "info") return;
@@ -502,10 +508,55 @@ async function camFlip(to) {
     sendCamInfo();
   } catch (err) { camSay(camError(err)); showCamCard(true); }
 }
+let camCode = "", camWant = false, camRetry = null, camRetryN = 0, camEverConnected = false, camUnstable = null;
 function camStop(msg = "已停止") {
+  camWant = false; clearTimeout(camRetry); clearTimeout(camUnstable);
   camLink?.close(); camLink = null;
   camStream?.getTracks().forEach((t) => t.stop()); camStream = null; $("camSend").srcObject = null;
   $("btnCamGo").textContent = "開始傳送"; camSay(msg); showCamCard(true); releaseWake();
+}
+/** 連到電腦（第一次或自動重連都走這裡；鏡頭保持開著） */
+async function camConnect() {
+  clearTimeout(camRetry);
+  camLink?.close(); camLink = null;
+  if (!camWant) return;
+  try {
+    camLink = await joinRoom(camCode, camStream, {
+      onOpen: sendCamInfo,
+      onData: (d) => {
+        if (d?.type === "flip") { camFlip(); showCamBar(); }
+        if (d?.type === "fps" && d.fps !== S.camFps) { S.camFps = d.fps; save(); camFlip(camFacing); }   // 用新的 fps 重新開鏡頭
+      },
+      fps: S.camFps,
+      onState: camOnState,
+    });
+  } catch (e) { camRetryLater(e.message || "連不上配對伺服器"); }
+}
+function camOnState(s) {
+  if (!camWant) return;
+  if (s === "connected") {
+    camEverConnected = true; camRetryN = 0; clearTimeout(camUnstable);
+    showCamCard(false); showCamBar(); sendCamInfo();
+  } else if (s === "calling") {
+    camSay("連線到電腦中…");
+  } else if (s === "unstable") {
+    // 網路暫時不穩：先等 8 秒看會不會自己恢復
+    showCamBar(); $("camBarTxt").textContent = "連線不穩，等待恢復…";
+    clearTimeout(camUnstable); camUnstable = setTimeout(() => camRetryLater("連線中斷"), 8000);
+  } else {
+    if (s === "notfound" && !camEverConnected && camRetryN >= 2) { camStop("找不到這個配對碼，請確認電腦上的號碼（電腦的配對畫面要開著）"); return; }
+    camRetryLater({ closed: "連線中斷", notfound: "電腦端沒有回應", error: "連線發生錯誤" }[s] || s);
+  }
+}
+/** 自動重新連線：2、4、6…最多每 10 秒試一次，直到按「停止」 */
+function camRetryLater(reason) {
+  if (!camWant) return;
+  clearTimeout(camRetry); clearTimeout(camUnstable);
+  camRetryN++;
+  const wait = Math.min(2000 * camRetryN, 10000);
+  if (camEverConnected) { showCamCard(false); showCamBar(); $("camBarTxt").textContent = `${reason}，${wait / 1000} 秒後自動重連（第 ${camRetryN} 次）`; }
+  else camSay(`${reason}，${wait / 1000} 秒後自動重試…`);
+  camRetry = setTimeout(camConnect, wait);
 }
 function setupCamMode() {
   $("start").classList.add("hidden"); $("camMode").classList.remove("hidden");
@@ -529,7 +580,7 @@ function setupCamMode() {
   };
   let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (camLink) sendCamInfo(); }, 300); });
   $("btnCamGo").onclick = async () => {
-    if (camLink) { camStop(); return; }
+    if (camWant) { camStop(); return; }
     const code = $("camCode").value.replace(/\D/g, "");
     if (code.length !== 6) { camSay("請輸入電腦畫面上的 6 位數配對碼"); $("camCode").focus(); return; }
     $("btnCamGo").disabled = true;
@@ -538,19 +589,8 @@ function setupCamMode() {
       camStream = await getCam(camFacing);
       $("camSend").srcObject = camStream; await $("camSend").play().catch(() => {});
       camSay("連線到電腦中…");
-      camLink = await joinRoom(code, camStream, {
-        onOpen: sendCamInfo,
-        onData: (d) => {
-          if (d?.type === "flip") { camFlip(); showCamBar(); }
-          if (d?.type === "fps" && d.fps !== S.camFps) { S.camFps = d.fps; save(); camFlip(camFacing); }   // 用新的 fps 重新開鏡頭
-        },
-        fps: S.camFps,
-        onState: (s) => {
-          if (s === "connected") { showCamCard(false); showCamBar(); sendCamInfo(); }
-          else if (s === "calling") camSay("連線到電腦中…");
-          else camStop({ closed: "連線中斷，請再按一次開始傳送", notfound: "找不到這個配對碼，請確認電腦上的號碼", error: "連線發生錯誤，請再試一次" }[s] || s);
-        },
-      });
+      camCode = code; camWant = true; camRetryN = 0; camEverConnected = false;
+      await camConnect();
       $("btnCamGo").textContent = "停止傳送";
       requestWake();
     } catch (e) { camStop(camError(e)); }
@@ -586,6 +626,102 @@ function drawOverlay(f, src) {
   for (const k of ["L", "R"]) if (f.hands?.[k]) line(f.hands[k].lm, HB, "#f2b84b", 1.5);
 }
 
+/* ---------------- 引導校準：角色示範 → 使用者跟著做並停住 1 秒 ---------------- */
+const CAL_STEPS = [
+  { id: "neutral", title: "自然站好（或坐好）、雙手放下、看著鏡頭", hint: "讓肩膀入鏡，停住不動約 1 秒" },
+  { id: "tpose", title: "雙手往兩側平舉成 T 字", hint: "手伸直和肩膀同高；手超出畫面的話可以略過這一步" },
+];
+let cal = null;        // 進行中：{ i, buf, since, prev, prevT, result:{} }
+let calData = null;    // 校準結果的原始資料（換角色、切鏡像時重新套用）
+const CAL_HOLD = 1.0;  // 停住幾秒
+function startCalibration() {
+  if (!running) { toast("請先開始動捕"); return; }
+  cal = { i: 0, buf: [], since: 0, prev: null, prevT: 0, result: {} };
+  $("calPanel").classList.remove("hidden"); calRender();
+}
+function calRender(hint) {
+  const st = CAL_STEPS[cal.i];
+  $("calStep").textContent = `校準 ${cal.i + 1}/${CAL_STEPS.length}・跟著角色做`;
+  $("calTitle").textContent = st.title;
+  $("calHint").textContent = hint || st.hint;
+  $("calProg").style.width = "0%";
+}
+function calNext(captured) {
+  cal.result[CAL_STEPS[cal.i].id] = captured || null;
+  cal.i++; cal.buf = []; cal.since = 0; cal.prev = null;
+  if (cal.i < CAL_STEPS.length) { calRender(); return; }
+  // 完成
+  const r = cal.result; cal = null; $("calPanel").classList.add("hidden");
+  if (!r.neutral) { toast("已略過校準"); return; }
+  calData = { neutral: r.neutral, tpose: r.tpose, rot: curRot() };
+  applyCalibration();
+  toast(r.tpose ? "校準完成（2/2）" : "校準完成（只做了第 1 步）");
+}
+function applyCalibration() {
+  const rig = stage.rig; if (!rig) return;
+  if (!calData) { rig.clearCalibration(); return; }
+  rig.calibrate(calData.neutral.world, calData.neutral.lm, calData.neutral.face, S.mirror, calData.tpose?.world || null);
+}
+$("calSkip").onclick = () => cal && calNext(null);
+$("calCancel").onclick = () => { cal = null; $("calPanel").classList.add("hidden"); };
+/** 每幀：檢查姿勢是否符合、是否停住；符合就累積，滿 1 秒就記錄 */
+function calUpdate(frame) {
+  const p = frame.pose, asp = frame.aspect || 1.333, now = performance.now() / 1000;
+  const st = CAL_STEPS[cal.i];
+  const bad = (msg) => { cal.buf = []; cal.since = 0; $("calProg").style.width = "0%"; if (msg) $("calHint").textContent = msg; };
+  if (!p) return bad("沒看到人，請讓上半身入鏡");
+  const L = p.lm, ok = (i) => (L[i].visibility ?? 1) > 0.6 && L[i].x > 0.01 && L[i].x < 0.99 && L[i].y > 0.01 && L[i].y < 0.99;
+  if (!ok(11) || !ok(12)) return bad("請讓兩邊肩膀都入鏡");
+  const X = (i) => L[i].x * asp, Y = (i) => L[i].y;
+  const sw = Math.hypot(X(11) - X(12), Y(11) - Y(12));
+  let match = false, why = st.hint;
+  if (st.id === "neutral") {
+    const tilt = Math.abs(Math.atan2(Y(11) - Y(12), X(11) - X(12))) * 57.3;
+    const tiltOk = Math.min(tilt, 180 - tilt) < 20;
+    const armsDown = [15, 16].every((i) => !ok(i) || Y(i) > Y(i === 15 ? 11 : 12) + 0.5 * sw);
+    match = tiltOk && armsDown && ok(0);
+    if (!armsDown) why = "請把雙手放下";
+  } else {
+    const side = (w, s, dir) => ok(w) && Math.abs(Y(w) - Y(s)) < 0.45 * sw && (X(w) - X(s)) * dir > 1.0 * sw;
+    match = ok(13) && ok(14) && side(15, 11, 1) && side(16, 12, -1);   // 人的左手在畫面右邊（未鏡像的原始畫面）
+    if (!match) why = "雙手往兩側伸直，和肩膀同高";
+  }
+  // 停住判斷：肩膀、手腕的移動速度
+  const pts = [0, 11, 12, 15, 16].map((i) => [X(i), Y(i)]);
+  let speed = 0;
+  if (cal.prev) { const dt = Math.max(0.005, now - cal.prevT); for (let k = 0; k < pts.length; k++) speed = Math.max(speed, Math.hypot(pts[k][0] - cal.prev[k][0], pts[k][1] - cal.prev[k][1]) / dt / sw); }
+  cal.prev = pts; cal.prevT = now;
+  const still = speed < 0.8;   // 每秒移動少於 0.8 個肩寬
+  if (!match) return bad(why);
+  if (!still) return bad("很好，請停住不動");
+  if (!cal.since) cal.since = now;
+  cal.buf.push({ world: p.world, lm: p.lm, face: frame.face?.matrix || null });
+  const prog = Math.min(1, (now - cal.since) / CAL_HOLD);
+  $("calProg").style.width = Math.round(prog * 100) + "%"; $("calHint").textContent = "很好，保持住…";
+  if (prog >= 1) {
+    const avg = (key) => cal.buf[0][key].map((_, i) => {
+      const o = { x: 0, y: 0, z: 0, visibility: 0 };
+      for (const f of cal.buf) { const q = f[key][i]; o.x += q.x; o.y += q.y; o.z += q.z; o.visibility += q.visibility ?? 1; }
+      const n = cal.buf.length; o.x /= n; o.y /= n; o.z /= n; o.visibility /= n; return o;
+    });
+    const face = [...cal.buf].reverse().find((f) => f.face)?.face || null;
+    calNext({ world: avg("world"), lm: avg("lm"), face });
+  }
+}
+/** 角色示範用的姿勢（MediaPipe 世界座標格式） */
+const _demo = {};
+function demoFrame(id) {
+  if (_demo[id]) return _demo[id];
+  const w = Array.from({ length: 33 }, () => ({ x: 0, y: 0, z: 0, visibility: 0.99 }));
+  const s = (i, x, y, z = 0) => Object.assign(w[i], { x, y, z });
+  s(0, 0, -0.62, -0.08); s(7, 0.07, -0.6); s(8, -0.07, -0.6); s(11, 0.18, -0.45); s(12, -0.18, -0.45);
+  if (id === "tpose") { s(13, 0.45, -0.45); s(14, -0.45, -0.45); s(15, 0.7, -0.45); s(16, -0.7, -0.45); s(17, 0.76, -0.44); s(18, -0.76, -0.44); s(19, 0.76, -0.47); s(20, -0.76, -0.47); }
+  else { s(13, 0.22, -0.2); s(14, -0.22, -0.2); s(15, 0.24, 0.04); s(16, -0.24, 0.04); s(17, 0.24, 0.1); s(18, -0.24, 0.1); s(19, 0.22, 0.12); s(20, -0.22, 0.12); }
+  s(23, 0.1, 0); s(24, -0.1, 0); s(25, 0.1, 0.42); s(26, -0.1, 0.42); s(27, 0.1, 0.82); s(28, -0.1, 0.82); s(31, 0.1, 0.86, -0.12); s(32, -0.1, 0.86, -0.12);
+  const lm = w.map((p) => ({ x: 0.5 + p.x * 0.45, y: 0.5 + p.y * 0.45, z: p.z, visibility: 0.99 }));
+  return (_demo[id] = { pose: { world: w, lm }, hands: {}, face: null, aspect: 1.333 });
+}
+
 /* ---------------- 主迴圈 ---------------- */
 function loop() {
   requestAnimationFrame(loop);
@@ -613,6 +749,11 @@ function step() {
       }
     }
     if (fresh && (S.showPip || S.split)) drawOverlay(frame || lastFrame, src || lastSrc);
+    if (cal && frame) calUpdate(frame);
+    if (calData && calData.rot !== curRot() && !cal) {   // 畫面方向變了，舊校準不適用
+      calData = null; stage.rig?.clearCalibration();
+      if (S.autoCal) { toast("畫面方向改變，重新校準"); startCalibration(); }
+    }
   }
   const now = performance.now();
   if (now - fpsT > 1000) {
@@ -621,8 +762,9 @@ function step() {
     camFpsNow = Math.round(camN * k); pipKey = "";   // 讓小畫面資訊更新鏡頭 fps
     fpsN = 0; camN = 0; fpsT = now;
   }
-  stage.update(running ? frame || lastFrame : null, {
-    mirror: S.mirror, fullBody: S.mode === "full", useHands: S.useHands, useFace: S.useFace,
+  const demo = cal ? demoFrame(CAL_STEPS[cal.i].id) : null;   // 校準中：角色示範要做的動作
+  stage.update(demo || (running ? frame || lastFrame : null), {
+    mirror: demo ? false : S.mirror, fullBody: S.mode === "full", useHands: demo ? false : S.useHands, useFace: S.useFace, noCal: !!demo,
     responsiveness: 14 + (100 - S.smooth) * 0.3,   // 去抖動主要交給 One Euro，骨頭這層只做輕微平滑
   });
 }
@@ -658,5 +800,5 @@ requestAnimationFrame(loop);
 
 // 供測試使用
 window.__mocap = { S, stage, tracker, loadModel, setMode, syncUI, step, get running() { return running; }, set running(v) { running = v; },
-  get autoRot() { return autoRot; }, curRot, setRemoteInfo(d) { remoteInfo = d; resetAutoRot(); },
+  get autoRot() { return autoRot; }, curRot, startCalibration, get cal() { return cal; }, get calData() { return calData; }, setRemoteInfo(d) { remoteInfo = d; resetAutoRot(); },
   async testStream(s, info) { stopStream(); S.src = "phone"; remoteInfo = info || null; resetAutoRot(); stream = s; video.srcObject = s; await video.play(); await beginTracking(); } };

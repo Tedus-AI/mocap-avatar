@@ -33,6 +33,9 @@
   <canvas id="srcCanvas" class="hidden"></canvas>
   <canvas id="overlay"></canvas>
   <span class="pip-info" id="pipInfo"></span>
+  <button class="pip-btn pip-cal" id="pipCal" title="重新校準：跟著角色做 2 個動作">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="2"/></svg><span>校準</span>
+  </button>
   <button class="pip-btn pip-rot" id="pipRotate" title="鏡頭畫面方向不對時才需要：每按一次轉 90°" aria-label="鏡頭畫面旋轉 90 度">
     <svg viewBox="0 0 24 24"><rect x="4" y="7" width="10" height="14" rx="1.5"/><path d="M14 3a7 7 0 0 1 6 6"/><path d="M20 5v4h-4"/></svg><span>轉向</span>
   </button>
@@ -84,6 +87,9 @@
     </div>
     <label class="row"><span><b>鎖定主角</b><small>畫面中有別人、海報或人形物品時，只追蹤鎖定的那個人</small></span><input type="checkbox" id="optLock" class="sw"></label>
     <button class="btn ghost" id="btnRelock">重新鎖定主角（換人或抓錯人時按）</button>
+    <label class="row"><span><b>開始時引導校準</b><small>跟著角色做 2 個動作，扣掉鏡頭歪斜、高低角度，角色才會站正</small></span><input type="checkbox" id="optAutoCal" class="sw"></label>
+    <button class="btn ghost" id="btnCal">重新校準</button>
+    <button class="btn ghost" id="btnCalClear">清除校準</button>
     <div class="row col"><span><b>畫面旋轉</b><small id="rotHint">自動：依手機直放／橫放與畫面中的人自動轉正</small></span>
       <div class="seg wide" id="segRot">
         <button data-rot="auto">自動</button><button data-rot="0">0°</button><button data-rot="90">90°</button><button data-rot="180">180°</button><button data-rot="270">270°</button>
@@ -227,6 +233,15 @@
       <p class="fine">直放、橫放都可以，電腦會自動轉正。傳送時請保持這個畫面開著、不要鎖定螢幕。</p>
     </div>
   </div>
+</div>
+
+<!-- ============ 引導校準 ============ -->
+<div id="calPanel" class="cal-panel hidden" role="dialog" aria-live="polite">
+  <div class="cal-step" id="calStep">校準 1/2</div>
+  <div class="cal-title" id="calTitle"></div>
+  <div class="cal-bar"><i id="calProg"></i></div>
+  <div class="cal-hint" id="calHint"></div>
+  <div class="cal-btns"><button id="calSkip">略過這一步</button><button id="calCancel">取消校準</button></div>
 </div>
 
 <div id="toast" role="status"></div>

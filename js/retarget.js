@@ -72,6 +72,8 @@ export class Rig {
     this.hipsOffset = V();      // 目標臀部位移（語意座標，公尺）
     this.hasUpperChest = !!this.node("upperChest");
     this.lastSeen = {};        // 肢體最後一次被看清楚的時間（秒）
+    this.calQ = null;          // 校準：扣掉鏡頭傾斜／沒正對鏡頭（語意座標的旋轉）
+    this.faceCalQ = null;      // 校準：扣掉鏡頭高低造成的抬頭／低頭
     this.HOLD = 0.8;           // 看不清楚時，維持上一個姿勢多久再慢慢放鬆
     this._measureRest();
     try { this._measureBody(); } catch (e) { console.warn("身體輪廓量測失敗，略過防穿模", e); this.body = null; }
@@ -138,8 +140,11 @@ export class Rig {
     const pose = frame.pose;
     const sides = mirror ? { L: "right", R: "left" } : { L: "left", R: "right" };  // 人的左 → 角色的哪一邊
     // MediaPipe 世界座標 → 語意 → rig
-    const cv = (p) => this.sem(V(mirror ? -p.x : p.x, -p.y, -p.z));
+    const calQ = opts.noCal ? null : this.calQ;   // 角色示範姿勢時不套用校準
+    const cv = (p) => { const v = V(mirror ? -p.x : p.x, -p.y, -p.z); if (calQ) v.applyQuaternion(calQ); return this.sem(v); };
     const vis = (i) => pose ? (pose.world[i]?.visibility ?? pose.lm[i]?.visibility ?? 0) : 0;
+    // 點在畫面內才可信：人靠近鏡頭時臀部在畫面外，MediaPipe 仍會「猜」一個位置，會讓身體歪掉
+    const inFrame = (i) => { const q = pose?.lm[i]; return q && q.x > 0.02 && q.x < 0.98 && q.y > 0.02 && q.y < 0.98; };
 
     // 世界旋轉暫存（rig 座標）
     const W = {};
@@ -164,7 +169,7 @@ export class Rig {
       const shMid = V().addVectors(shL, shR).multiplyScalar(0.5);
       const hipL = cv(w[P.lHip]), hipR = cv(w[P.rHip]);
       const hipMid = V().addVectors(hipL, hipR).multiplyScalar(0.5);
-      const hipsOk = vis(P.lHip) > 0.5 && vis(P.rHip) > 0.5;
+      const hipsOk = vis(P.lHip) > 0.6 && vis(P.rHip) > 0.6 && inFrame(P.lHip) && inFrame(P.rHip);
       const left0 = this.sem(V(1, 0, 0)), up0 = this.sem(V(0, 1, 0));
       let torsoUp = hipsOk ? V().subVectors(shMid, hipMid) : up0.clone();
 
@@ -289,6 +294,7 @@ export class Rig {
       const qCam = Q().setFromRotationMatrix(m);
       // 相機座標（x 右、y 上、z 朝相機）＝語意座標（非鏡像時）；鏡像＝對 X 反射
       if (mirror) { qCam.y = -qCam.y; qCam.z = -qCam.z; }
+      if (this.faceCalQ) qCam.premultiply(this.faceCalQ);
       const qRig = this.Mq.clone().multiply(qCam).multiply(this.Mq.clone().invert());
       const topW = W[this.hasUpperChest ? "upperChest" : "chest"] || Q();
       this._applyHead(topW.clone().invert().multiply(qRig), topW);
@@ -344,9 +350,9 @@ export class Rig {
     const Minv = this.M.clone().transpose();   // 正交矩陣：轉置＝反矩陣（rig → 語意）
     const toSem = this.root.matrixWorld.clone().invert().premultiply(Minv);
     const hips = this.pos.hips.clone().applyMatrix4(Minv);
-    const band = Math.abs(this.pos.leftUpperArm.clone().applyMatrix4(Minv).x - hips.x) * 0.85;
     const Y0 = -0.7, STEP = 0.02, N = 80;
-    const front = new Float32Array(N).fill(-Infinity);
+    const xMin = new Float32Array(N).fill(Infinity), xMax = new Float32Array(N).fill(-Infinity);
+    const zMin = new Float32Array(N).fill(Infinity), zMax = new Float32Array(N).fill(-Infinity);
     const v = new THREE.Vector3(), m = new THREE.Matrix4();
     vrm.scene.traverse((o) => {
       if (!o.isSkinnedMesh) return;
@@ -359,57 +365,84 @@ export class Rig {
         for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w > bw) { bw = w; bj = si.getComponent(i, k); } }
         const bone = bones[bj]; if (!bone || !isTorso(bone)) continue;
         v.fromBufferAttribute(pos, i).applyMatrix4(m).sub(hips);
-        if (Math.abs(v.x) > band) continue;
         const bi = Math.floor((v.y - Y0) / STEP); if (bi < 0 || bi >= N) continue;
-        if (v.z > front[bi]) front[bi] = v.z;
+        if (v.x < xMin[bi]) xMin[bi] = v.x; if (v.x > xMax[bi]) xMax[bi] = v.x;
+        if (v.z < zMin[bi]) zMin[bi] = v.z; if (v.z > zMax[bi]) zMax[bi] = v.z;
       }
     });
-    // 相鄰高度取最大，填補空隙
-    const sm = new Float32Array(N).fill(-Infinity);
-    for (let i = 0; i < N; i++) for (let d = -1; d <= 1; d++) { const j = i + d; if (j >= 0 && j < N && front[j] > sm[i]) sm[i] = front[j]; }
-    this.body = { front: sm, Y0, STEP, N, band, Minv };
+    // 每個高度：身體截面近似為橢圓（中心、半寬、半厚）；相鄰高度取聯集，填補空隙
+    const E = [];
+    for (let i = 0; i < N; i++) {
+      let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+      for (let d = -1; d <= 1; d++) { const j = i + d; if (j < 0 || j >= N || !isFinite(xMin[j])) continue;
+        a0 = Math.min(a0, xMin[j]); a1 = Math.max(a1, xMax[j]); b0 = Math.min(b0, zMin[j]); b1 = Math.max(b1, zMax[j]); }
+      E.push(isFinite(a0) ? { cx: (a0 + a1) / 2, cz: (b0 + b1) / 2, a: (a1 - a0) / 2, b: (b1 - b0) / 2 } : null);
+    }
+    this.body = { E, Y0, STEP, N, Minv };
   }
 
-  /** 計算 av 側手臂各點（以目前目標姿勢），若穿進身體就把上臂往前轉 */
+  /** 防穿模：上臂、手肘、前臂、手腕、指尖若進入身體截面（橢圓＋安全距離），以肩膀為圓心把手臂轉出來 */
   _avoidBody(av, W, hipsW) {
     const B = this.body; if (!B || !W[av + "Hand"] || !W[av + "UpperArm"]) return;
     const p = this.pos;
     const chain = ["hips", "spine", "chest", "upperChest", av + "Shoulder", av + "UpperArm", av + "LowerArm", av + "Hand"]
       .filter((n) => p[n] && W[n]);
     const fk = () => {
-      const P = { hips: p.hips.clone() };
+      const Pp = { hips: p.hips.clone() };
       for (let i = 1; i < chain.length; i++) {
         const a = chain[i - 1], b = chain[i];
-        P[b] = V().subVectors(p[b], p[a]).applyQuaternion(W[a]).add(P[a]);
+        Pp[b] = V().subVectors(p[b], p[a]).applyQuaternion(W[a]).add(Pp[a]);
       }
-      return P;
+      return Pp;
     };
     const hipsInv = hipsW.clone().invert();
-    const fwdW = this.sem(V(0, 0, 1)).applyQuaternion(hipsW).normalize();
+    const toRig = this.M.clone().premultiply(new THREE.Matrix4().makeRotationFromQuaternion(hipsW));   // 臀部語意座標 → rig
     const handLen = p[av + "MiddleProximal"] ? p[av + "MiddleProximal"].distanceTo(p[av + "Hand"]) * 1.9 : 0.08;
-    const MARGIN = 0.03;
+    const M_ARM = 0.025, M_HAND = 0.03;   // 安全距離
     const upper = av + "UpperArm", lower = av + "LowerArm", hand = av + "Hand";
     const parentW = W[chain[chain.indexOf(upper) - 1]];
-    for (let iter = 0; iter < 4; iter++) {
-      const P = fk();
-      const tip = this.rd[av + "HandFwd"].clone().applyQuaternion(W[hand]).multiplyScalar(handLen).add(P[hand]);
-      const samples = [P[hand], tip, V().addVectors(P[lower], P[hand]).multiplyScalar(0.5)];
+    const sideSign = av === "left" ? 1 : -1;   // 只往自己那一側或前後推，不穿過身體到另一邊
+    for (let iter = 0; iter < 5; iter++) {
+      const Pp = fk();
+      const sh = Pp[upper];
+      const tip = this.rd[av + "HandFwd"].clone().applyQuaternion(W[hand]).multiplyScalar(handLen).add(Pp[hand]);
+      const lerp = (a, b, t) => V().lerpVectors(a, b, t);
+      // 先處理手掌、前臂（手在身體前面時把整隻手臂往前帶），沒有穿模才處理上臂（往外側推）
+      const distal = [[lerp(Pp[lower], Pp[hand], 0.5), M_ARM], [Pp[hand], M_HAND], [tip, M_HAND]];
+      const proximal = [[lerp(sh, Pp[lower], 0.75), M_ARM], [Pp[lower], M_ARM]];
+      const shY = V().subVectors(sh, Pp.hips).applyQuaternion(hipsInv).applyMatrix4(B.Minv).y;
       let worst = null;
-      for (const sPt of samples) {
-        const r = V().subVectors(sPt, P.hips).applyQuaternion(hipsInv).applyMatrix4(B.Minv);
-        if (Math.abs(r.x) > B.band) continue;
-        const bi = Math.floor((r.y - B.Y0) / B.STEP); if (bi < 0 || bi >= B.N || !isFinite(B.front[bi])) continue;
-        const pen = B.front[bi] + MARGIN - r.z;
-        if (pen > 0.002 && (!worst || pen > worst.pen)) worst = { pt: sPt, pen };
+      for (const group of [distal, proximal]) {
+      const isDistal = group === distal;
+      for (const [pt, mg] of group) {
+        const r = V().subVectors(pt, Pp.hips).applyQuaternion(hipsInv).applyMatrix4(B.Minv);   // 臀部語意座標
+        if (!isDistal && r.y > shY - 0.12) continue;   // 上臂靠近肩關節的部分本來就在身體輪廓內，不檢查
+        const bi = Math.floor((r.y - B.Y0) / B.STEP); if (bi < 0 || bi >= B.N) continue;
+        const e = B.E[bi]; if (!e) continue;
+        const a = e.a + mg, b = e.b + mg;
+        const dx = r.x - e.cx, dz = r.z - e.cz;
+        const val = (dx * dx) / (a * a) + (dz * dz) / (b * b);
+        if (val >= 1) continue;
+        // 推出方向：橢圓徑向；若徑向朝另一側（手跨到身體另一邊），改成往前推
+        let tx, tz;
+        const frontZ = e.cz + b * Math.sqrt(Math.max(0, 1 - (dx * dx) / (a * a)));
+        if ((isDistal && Math.abs(dx) < 0.7 * a) || (dx * sideSign < 0 && Math.abs(dx) > 0.01)) {
+          tx = r.x; tz = frontZ;   // 手在身體前方（或跨到另一側）：直接往前推
+        } else {
+          const k = 1 / Math.sqrt(Math.max(val, 1e-6)); tx = e.cx + dx * k; tz = e.cz + dz * k;   // 身體側邊、上臂：往外推
+        }
+        const disp = V(tx - r.x, 0, tz - r.z);
+        if (this.debugAvoid) (this.debugAvoid[av] ||= []).push({ iter, r: r.toArray().map((x) => +x.toFixed(3)), e: [e.cx, e.cz, e.a, e.b].map((x) => +x.toFixed(3)), disp: disp.toArray().map((x) => +x.toFixed(3)) });
+        const depth = disp.length();
+        if (depth > 0.002 && (!worst || depth > worst.depth)) worst = { pt, depth, disp };
+      }
+      if (worst) break;
       }
       if (!worst) return;
-      // 以肩膀為圓心，把上臂轉到讓最深的那點移到身體表面外
-      const sh = P[upper];
-      const from = V().subVectors(worst.pt, sh), to = V().addVectors(worst.pt, fwdW.clone().multiplyScalar(worst.pen)).sub(sh);
-      const q = aim(from, to);
+      const to = worst.disp.clone().applyMatrix4(toRig).add(worst.pt);
+      const q = aim(V().subVectors(worst.pt, sh), V().subVectors(to, sh));
       for (const n of [upper, lower, hand]) W[n] = q.clone().multiply(W[n]);
       this.target.set(upper, parentW.clone().invert().multiply(W[upper]));
-      // 前臂、手掌、手指的本地旋轉不變（父子一起轉）
     }
   }
 
@@ -421,6 +454,40 @@ export class Rig {
       W[n] = pw.clone().multiply(t); pw = W[n];
     }
   }
+
+  /** 校準：把「現在的姿勢」當成角色站正（扣掉鏡頭傾斜、俯仰、人沒正對鏡頭）
+   *  world/lm：數幀平均後的身體關鍵點；faceMatrix：臉部矩陣（可無） */
+  calibrate(world, lm, faceMatrix, mirror, tposeWorld = null) {
+    const s = (p) => V(mirror ? -p.x : p.x, -p.y, -p.z);
+    const shL = s(world[P.lSh]), shR = s(world[P.rSh]);
+    let shLine = mirror ? V().subVectors(shR, shL) : V().subVectors(shL, shR);
+    if (tposeWorld) {
+      // T 字：兩手腕的連線比肩線長很多，判斷「水平」與「正對鏡頭」更準（權重 70%）
+      const wL = s(tposeWorld[P.lWr]), wR = s(tposeWorld[P.rWr]);
+      const arm = mirror ? V().subVectors(wR, wL) : V().subVectors(wL, wR);
+      if (arm.length() > 0.3) shLine = shLine.normalize().multiplyScalar(0.3).add(arm.normalize().multiplyScalar(0.7));
+    }
+    const ok = (i) => (lm[i].visibility ?? 1) > 0.6 && lm[i].x > 0.02 && lm[i].x < 0.98 && lm[i].y > 0.02 && lm[i].y < 0.98;
+    let measured;
+    if (ok(P.lHip) && ok(P.rHip)) {
+      const up = V().addVectors(shL, shR).multiplyScalar(0.5).sub(V().addVectors(s(world[P.lHip]), s(world[P.rHip])).multiplyScalar(0.5));
+      measured = frameRot(V(1, 0, 0), V(0, 1, 0), shLine, up);        // 傾斜＋俯仰＋轉向
+    } else {
+      // 只看得到上半身：用肩線扣掉左右傾斜與轉向，俯仰不動
+      const h = shLine.clone(); h.y = 0;
+      const yaw = aim(V(1, 0, 0), h.lengthSq() > 1e-6 ? h : V(1, 0, 0));
+      const roll = aim(h.lengthSq() > 1e-6 ? h.normalize() : V(1, 0, 0), shLine.clone().normalize());
+      measured = roll.multiply(yaw);
+    }
+    this.calQ = measured.invert();
+    if (faceMatrix) {
+      const q = Q().setFromRotationMatrix(new THREE.Matrix4().fromArray(faceMatrix));
+      if (mirror) { q.y = -q.y; q.z = -q.z; }
+      this.faceCalQ = q.invert();
+    } else this.faceCalQ = null;
+    this.calMirror = mirror;
+  }
+  clearCalibration() { this.calQ = null; this.faceCalQ = null; }
 
   _applyHead(localTotal, topW) {
     if (this.node("neck")) {
@@ -455,7 +522,8 @@ export class Rig {
   _solveHand(av, hand, mirror, W, setLocal, aimBone) {
     const pts = hand.world || hand.lm;
     const sx = hand.world ? 1 : (hand.aspect || 1.333);
-    const cv = (p) => this.sem(V((mirror ? -p.x : p.x) * sx, -p.y, -p.z * (hand.world ? 1 : sx)));
+    const calQ = this.calQ;
+    const cv = (p) => { const v = V((mirror ? -p.x : p.x) * sx, -p.y, -p.z * (hand.world ? 1 : sx)); if (calQ) v.applyQuaternion(calQ); return this.sem(v); };
     const H = pts.map(cv);
     const fwd = V().subVectors(H[9], H[0]);
     const side = V().subVectors(H[5], H[17]);
