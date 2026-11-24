@@ -50,9 +50,9 @@ export class Tracker {
 
   /** 平滑度 0~100 → 濾波參數（越大越穩、反應略慢） */
   setSmooth(v) {
-    const minCutoff = 3.0 * Math.pow(0.35 / 3.0, v / 100);   // 3.0Hz ~ 0.35Hz
-    const beta = 0.9 - 0.5 * (v / 100);
-    for (const f of [this.fWorld, this.fLm, ...this.fHand.L, ...this.fHand.R]) f.setParams(minCutoff, beta);
+    // 預設 45 時＝XR Animator 的參數（minCutoff 1、beta 1、dCutoff 2，見其 mocap_lib_module.js）
+    const minCutoff = Math.pow(2.5, (45 - v) / 45);   // 0→2.5Hz、45→1Hz、100→0.33Hz
+    for (const f of [this.fWorld, this.fLm, ...this.fHand.L, ...this.fHand.R]) f.setParams(minCutoff, 1.0, 2.0);
   }
 
   async _lib() {

@@ -17,18 +17,18 @@ class OneEuro {
 
 /** 一組關鍵點（x,y,z）各自濾波；超過 resetAfter 秒沒資料就重來 */
 export class LandmarkFilter {
-  constructor({ minCutoff = 1.2, beta = 0.6, resetAfter = 0.5 } = {}) {
-    this.opts = { minCutoff, beta }; this.resetAfter = resetAfter; this.f = null; this.t = 0;
+  constructor({ minCutoff = 1.0, beta = 1.0, dCutoff = 2.0, resetAfter = 0.5 } = {}) {
+    this.opts = { minCutoff, beta, dCutoff }; this.resetAfter = resetAfter; this.f = null; this.t = 0;
   }
-  setParams(minCutoff, beta) {
-    this.opts = { minCutoff, beta };
-    if (this.f) for (const p of this.f) for (const c of p) { c.minCutoff = minCutoff; c.beta = beta; }
+  setParams(minCutoff, beta, dCutoff = 2.0) {
+    this.opts = { minCutoff, beta, dCutoff };
+    if (this.f) for (const p of this.f) for (const c of p) { c.minCutoff = minCutoff; c.beta = beta; c.dCutoff = dCutoff; }
   }
   apply(pts, tSec) {
     if (!pts) return pts;
     const dt = tSec - this.t;
     if (!this.f || this.f.length !== pts.length || dt > this.resetAfter || dt <= 0) {
-      this.f = pts.map(() => [0, 1, 2].map(() => new OneEuro(this.opts.minCutoff, this.opts.beta)));
+      this.f = pts.map(() => [0, 1, 2].map(() => new OneEuro(this.opts.minCutoff, this.opts.beta, this.opts.dCutoff)));
     }
     this.t = tSec;
     return pts.map((p, i) => {
