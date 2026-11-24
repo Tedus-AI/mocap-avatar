@@ -64,14 +64,17 @@ export class AvatarStage {
     return vrm;
   }
 
-  /** 鏡頭構圖：upper＝上半身特寫、full＝全身 */
+  /** 鏡頭構圖：upper＝上半身特寫、full＝全身、cal＝校準示範 */
   frame(mode, instant = false) {
     this.framing = mode;
     const hy = this.headY || 1.4;
     const tall = this.camera.aspect < 0.8;          // 手機直立
     let target, dist;
     if (mode === "full") { target = new THREE.Vector3(0, hy * 0.55, 0); dist = (tall ? 5.2 : 3.6) * (hy / 1.4); }
-    else { target = new THREE.Vector3(0, hy - 0.26, 0); dist = (tall ? 2.5 : 2.0) * (hy / 1.4); }
+    else if (mode === "cal") {   // 校準示範：上半身＋兩手平舉都要入鏡
+      const tv = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2), th = tv * this.camera.aspect;
+      target = new THREE.Vector3(0, hy - 0.22, 0); dist = Math.max((0.66 * hy) / th, 0.5 / tv);
+    } else { target = new THREE.Vector3(0, hy - 0.26, 0); dist = (tall ? 2.5 : 2.0) * (hy / 1.4); }
     this._camGoal = { target, pos: target.clone().add(new THREE.Vector3(0, 0.05, dist)) };
     if (instant) { this.controls.target.copy(target); this.camera.position.copy(this._camGoal.pos); this._camGoal = null; }
     this.controls.update();

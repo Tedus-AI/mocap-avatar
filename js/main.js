@@ -218,7 +218,7 @@ $("btnCal").onclick = () => { showSheet(null); startCalibration(); };
 $("pipCal").onclick = () => startCalibration();
 $("btnCalClear").onclick = () => { calData = null; stage.rig?.clearCalibration(); toast("已清除校準"); };
 $("optPip").onchange = (e) => { S.showPip = e.target.checked; save(); syncUI(); };
-function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(S.mode, true); }
+function setSplit(on) { S.split = on; save(); syncUI(); resize(); stage.frame(cal ? "cal" : S.mode, true); }
 $("optSplit").onchange = (e) => setSplit(e.target.checked);
 $("optLock").onchange = (e) => { S.lockOn = e.target.checked; tracker.lockOn = S.lockOn; tracker.relock(); save(); };
 $("btnRelock").onclick = () => { tracker.relock(); toast("已重新鎖定：會追蹤畫面中最大（最靠近鏡頭）的人"); };
@@ -310,7 +310,7 @@ function sourceFrame() {
   drawRot(sctx, r, vw, vh);
   return { el: srcCanvas, w: sw, h: sh, rot: r };
 }
-let upsideSince = 0;
+let upsideSince = 0, uprightSince = 0, uprightSeen = false;
 /** 軀幹與「向上」的夾角：0°＝站正、180°＝上下顛倒（以目前送去追蹤的畫面為準） */
 function torsoAngle(lm) {
   const dx = (lm[11].x + lm[12].x - lm[23].x - lm[24].x) / 2, dy = (lm[11].y + lm[12].y - lm[23].y - lm[24].y) / 2;
@@ -320,14 +320,16 @@ function torsoAngle(lm) {
 /** 對原始影像試幾個旋轉角，回傳人「最站正」的那個；模型載入中回傳 undefined */
 function testRotations(cands) {
   const vw = video.videoWidth, vh = video.videoHeight;
-  let best = null;
+  let best = null; const all = {};
   for (const r of cands) {
     testCanvas.width = r % 180 ? vh : vw; testCanvas.height = r % 180 ? vw : vh;
     drawRot(tctx, r, vw, vh);
     const sc = tracker.uprightScore(testCanvas);
     if (sc === undefined) return undefined;
+    all[r] = sc;
     if (sc !== null && (!best || sc > best.sc)) best = { r, sc };
   }
+  if (best) best.all = all;
   return best;
 }
 function updateAutoRot() {
@@ -337,7 +339,7 @@ function updateAutoRot() {
   // A. 手機回報直放／橫放，但收到的影像方向不符 → 試 90°/270°
   const key = `${vw}x${vh}|${remoteInfo?.portrait}|${remoteInfo?.facing}`;
   const mismatch = !!remoteInfo && remoteInfo.portrait !== (vh > vw) && Math.abs(vw - vh) > 8;
-  if (key !== autoKey) { autoKey = key; autoLocked = false; upsideSince = 0; autoRot = mismatch ? 90 : 0; }
+  if (key !== autoKey) { autoKey = key; autoLocked = false; upsideSince = 0; uprightSince = 0; uprightSeen = false; autoRot = mismatch ? 90 : 0; }
   if (mismatch && !autoLocked && now - autoLastTry > 800) {
     autoLastTry = now;
     const best = testRotations([90, 270]);
@@ -345,15 +347,23 @@ function updateAutoRot() {
     return;
   }
   // B. 任何來源：人持續上下顛倒超過 1.2 秒 → 四個方向都試，選站正的
+  //    彎腰、伏地挺身、波比跳時頭也會低於臀部，所以還要「腳也朝上」（膝蓋在臀部上方）才算顛倒；
+  //    在目前方向下已經看過人站正，就要顛倒更久（4 秒）才重新判斷，避免運動動作誤觸
   const p = tracker.last.pose;
   const ok = p && [11, 12, 23, 24].every((i) => (p.lm[i].visibility ?? 1) > 0.5);
-  if (ok && torsoAngle(p.lm) > 120) upsideSince ||= now; else upsideSince = 0;
-  if (upsideSince && now - upsideSince > 1200 && now - autoLastTry > 800) {
+  const ang = ok ? torsoAngle(p.lm) : 90;
+  if (ok && ang < 45) { uprightSince ||= now; if (now - uprightSince > 1000) uprightSeen = true; } else uprightSince = 0;
+  const knees = ok ? [25, 26].filter((i) => (p.lm[i].visibility ?? 1) > 0.5) : [];
+  const legsUp = knees.length ? knees.every((i) => p.lm[i].y < p.lm[i - 2].y - 0.02) : ang > 150;
+  if (ok && ang > 120 && legsUp) upsideSince ||= now; else upsideSince = 0;
+  const need = uprightSeen ? 4000 : 1200;
+  if (upsideSince && now - upsideSince > need && now - autoLastTry > 800) {
     autoLastTry = now;
     const best = testRotations([0, 90, 180, 270]);
     if (best === undefined) return;
-    if (best && best.sc > 0.04 && best.r !== autoRot) {
-      autoRot = best.r; autoLocked = true; upsideSince = 0;
+    const cur = best?.all?.[autoRot] ?? -1;
+    if (best && best.sc > 0.04 && best.r !== autoRot && best.sc > cur + 0.05) {
+      autoRot = best.r; autoLocked = true; upsideSince = 0; uprightSince = 0; uprightSeen = false;
       toast(`偵測到畫面上下顛倒，已自動轉正（${best.r}°）`);
     }
   }
@@ -638,6 +648,7 @@ function startCalibration() {
   if (!running) { toast("請先開始動捕"); return; }
   cal = { i: 0, buf: [], since: 0, prev: null, prevT: 0, result: {} };
   $("calPanel").classList.remove("hidden"); calRender();
+  stage.frame("cal");
 }
 function calRender(hint) {
   const st = CAL_STEPS[cal.i];
@@ -651,7 +662,7 @@ function calNext(captured) {
   cal.i++; cal.buf = []; cal.since = 0; cal.prev = null;
   if (cal.i < CAL_STEPS.length) { calRender(); return; }
   // 完成
-  const r = cal.result; cal = null; $("calPanel").classList.add("hidden");
+  const r = cal.result; cal = null; $("calPanel").classList.add("hidden"); stage.frame(S.mode);
   if (!r.neutral) { toast("已略過校準"); return; }
   calData = { neutral: r.neutral, tpose: r.tpose, rot: curRot() };
   applyCalibration();
@@ -663,7 +674,7 @@ function applyCalibration() {
   rig.calibrate(calData.neutral.world, calData.neutral.lm, calData.neutral.face, S.mirror, calData.tpose?.world || null);
 }
 $("calSkip").onclick = () => cal && calNext(null);
-$("calCancel").onclick = () => { cal = null; $("calPanel").classList.add("hidden"); };
+$("calCancel").onclick = () => { cal = null; $("calPanel").classList.add("hidden"); stage.frame(S.mode); };
 /** 每幀：檢查姿勢是否符合、是否停住；符合就累積，滿 1 秒就記錄 */
 function calUpdate(frame) {
   const p = frame.pose, asp = frame.aspect || 1.333, now = performance.now() / 1000;
@@ -681,6 +692,8 @@ function calUpdate(frame) {
     const armsDown = [15, 16].every((i) => !ok(i) || Y(i) > Y(i === 15 ? 11 : 12) + 0.5 * sw);
     match = tiltOk && armsDown && ok(0);
     if (!armsDown) why = "請把雙手放下";
+    else if (!tiltOk) why = "身體站正、肩膀放平";
+    else if (!ok(0)) why = "臉朝向鏡頭";
   } else {
     const side = (w, s, dir) => ok(w) && Math.abs(Y(w) - Y(s)) < 0.45 * sw && (X(w) - X(s)) * dir > 1.0 * sw;
     match = ok(13) && ok(14) && side(15, 11, 1) && side(16, 12, -1);   // 人的左手在畫面右邊（未鏡像的原始畫面）
