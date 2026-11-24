@@ -242,7 +242,8 @@ export class Rig {
       for (const av of ["left", "right"]) this._avoidBody(av, W, hipsW);
 
       // ---------- 腿 ----------
-      const legSeen = (iKn, iAn) => vis(iKn) > 0.4 && vis(iAn) > 0.35;
+      // 深蹲／收腿時腳踝藏在大腿後面，可見度會掉到 0.3 左右：膝蓋很清楚、腳踝在畫面內就照用
+      const legSeen = (iKn, iAn) => (vis(iKn) > 0.4 && vis(iAn) > 0.35) || (vis(iKn) > 0.6 && vis(iAn) > 0.25 && inFrame(iAn));
       for (const person of ["L", "R"]) {
         const av = sides[person];
         const iHip = person === "L" ? P.lHip : P.rHip, iKn = person === "L" ? P.lKnee : P.rKnee;
