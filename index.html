@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0f1218">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Mocap Avatar · 動態捕捉虛擬人物</title>
+<link rel="stylesheet" href="css/app.css?v=__BUILD_VERSION__">
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.js",
+  "three/addons/": "./vendor/three/addons/"
+} }
+</script>
+<script src="vendor/peerjs.min.js" defer></script>
+</head>
+<body>
+<div id="bg"></div>
+<canvas id="stage"></canvas>
+
+<!-- ============ 頂部狀態列 ============ -->
+<header class="topbar">
+  <div class="brand"><span class="logo-dot"></span>Mocap Avatar</div>
+  <div id="statusPill" class="pill idle" role="status"><i></i><span>尚未開始</span></div>
+  <div class="meta"><span id="fps">—</span></div>
+</header>
+
+<!-- ============ 鏡頭小畫面 ============ -->
+<div id="pip" class="pip hidden" aria-label="鏡頭畫面">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <button class="pip-toggle" id="pipToggle" title="縮小/放大鏡頭畫面" aria-label="縮小/放大鏡頭畫面">
+    <svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>
+  </button>
+</div>
+
+<!-- ============ 底部操作列（所有功能都看得到，不用雙擊） ============ -->
+<nav class="dock" id="dock" aria-label="主要操作">
+  <div class="seg" role="radiogroup" aria-label="動捕範圍">
+    <button data-mode="upper" class="on" role="radio">上半身</button>
+    <button data-mode="full" role="radio">全身</button>
+  </div>
+  <span class="dock-sep"></span>
+  <button class="dk" id="btnFlip" title="切換前／後鏡頭">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><path d="M9 13a3 3 0 0 0 5.2 2M15 12a3 3 0 0 0-5.2-2"/><path d="M14.5 15.5l-.3-1.6 1.6-.2M9.5 8.5l.3 1.6-1.6.2"/></svg>
+    <span>鏡頭</span></button>
+  <button class="dk" data-sheet="sheetAvatar" title="更換角色">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="7" r="4"/><path d="M4 21c1-4.5 4.5-7 8-7s7 2.5 8 7"/></svg>
+    <span>角色</span></button>
+  <button class="dk" data-sheet="sheetBg" title="背景">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 16l5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.6"/></svg>
+    <span>背景</span></button>
+  <button class="dk" id="btnView" title="重設視角（也可以用手指拖曳/縮放）">
+    <svg viewBox="0 0 24 24"><path d="M3 9V4h5M21 9V4h-5M3 15v5h5M21 15v5h-5"/><circle cx="12" cy="12" r="3"/></svg>
+    <span>視角</span></button>
+  <button class="dk" data-sheet="sheetSettings" title="設定">
+    <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+    <span>設定</span></button>
+  <button class="dk" id="btnFull" title="全螢幕">
+    <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    <span>全螢幕</span></button>
+</nav>
+
+<!-- ============ 設定面板 ============ -->
+<section class="sheet" id="sheetSettings" aria-label="設定" aria-hidden="true">
+  <header><h2>設定</h2><button class="x" data-close aria-label="關閉">✕</button></header>
+  <div class="sheet-body">
+    <h3>追蹤</h3>
+    <label class="row"><span><b>臉部表情</b><small>眨眼、嘴型、頭部轉動</small></span><input type="checkbox" id="optFace" class="sw"></label>
+    <label class="row"><span><b>手指</b><small>握拳、比手勢</small></span><input type="checkbox" id="optHands" class="sw"></label>
+    <label class="row"><span><b>鏡像動作</b><small>開啟：角色像照鏡子一樣跟你同一邊動</small></span><input type="checkbox" id="optMirror" class="sw"></label>
+    <div class="row col"><span><b>效能</b><small id="tierHint"></small></span>
+      <div class="seg wide" id="segTier">
+        <button data-tier="low">省電</button><button data-tier="mid">平衡</button><button data-tier="high">高品質</button>
+      </div>
+    </div>
+    <div class="row col"><span><b>動作平滑</b><small>越往右越穩，但反應會慢一點</small></span>
+      <input type="range" id="optSmooth" min="0" max="100" step="1"></div>
+    <h3>畫面</h3>
+    <label class="row"><span><b>顯示鏡頭畫面</b></span><input type="checkbox" id="optPip" class="sw"></label>
+    <label class="row"><span><b>顯示骨架線</b></span><input type="checkbox" id="optSkel" class="sw"></label>
+    <h3>關於</h3>
+    <p class="about">版本 <span id="verTxt"></span><br>
+      動作概念參考 <a href="https://github.com/ButzYung/SystemAnimatorOnline" target="_blank" rel="noopener">XR Animator</a>（ButzYung，CC BY-NC-SA 4.0），本專案以相同授權釋出，僅供非商業使用。<br>
+      追蹤：Google MediaPipe・角色：three-vrm（pixiv）</p>
+    <button class="btn ghost" id="btnRestart">回到開始畫面</button>
+  </div>
+</section>
+
+<!-- ============ 角色面板 ============ -->
+<section class="sheet" id="sheetAvatar" aria-label="角色" aria-hidden="true">
+  <header><h2>角色</h2><button class="x" data-close aria-label="關閉">✕</button></header>
+  <div class="sheet-body">
+    <h3>內建角色</h3>
+    <div class="models" id="modelGrid"></div>
+    <h3>我的角色</h3>
+    <div class="models" id="myModel"></div>
+    <button class="btn primary" id="btnLoadVrm">選擇 VRM 檔案…</button>
+    <p class="hint">VRM 是虛擬人物的通用格式。可以用免費的 <a href="https://vroid.com/studio" target="_blank" rel="noopener">VRoid Studio</a> 自己捏一個，匯出成 .vrm 後在這裡載入。載入的角色會記在這台裝置上（不會上傳），下次自動使用。</p>
+  </div>
+</section>
+
+<!-- ============ 背景面板 ============ -->
+<section class="sheet" id="sheetBg" aria-label="背景" aria-hidden="true">
+  <header><h2>背景</h2><button class="x" data-close aria-label="關閉">✕</button></header>
+  <div class="sheet-body">
+    <div class="swatches" id="bgSwatches">
+      <button data-bg="studio" class="sw-studio"><span>攝影棚</span></button>
+      <button data-bg="dusk" class="sw-dusk"><span>黃昏</span></button>
+      <button data-bg="green" class="sw-green"><span>綠幕</span></button>
+      <button data-bg="blue" class="sw-blue"><span>藍幕</span></button>
+      <button data-bg="white" class="sw-white"><span>白色</span></button>
+      <button data-bg="image" class="sw-image"><span>自訂圖片…</span></button>
+    </div>
+    <p class="hint">綠幕／藍幕可以在 OBS 等直播軟體去背。</p>
+  </div>
+</section>
+<div class="scrim" id="scrim"></div>
+
+<!-- ============ 開始畫面 ============ -->
+<div id="start" class="overlay">
+  <div class="card start-card">
+    <h1>Mocap Avatar</h1>
+    <p class="lead">用鏡頭讓虛擬角色跟著你動 — 臉、身體、手指</p>
+
+    <div class="step"><span class="num">1</span><b>影像從哪裡來？</b></div>
+    <div class="choices" id="srcChoices" role="radiogroup">
+      <button data-src="local" class="choice on" role="radio">
+        <svg viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg>
+        <b>這台裝置的鏡頭</b><small>手機、平板、電腦都可以</small></button>
+      <button data-src="phone" class="choice" role="radio">
+        <svg viewBox="0 0 24 24"><rect x="2" y="5" width="13" height="10" rx="1.5"/><path d="M6 19h5M8.5 15v4"/><rect x="17" y="8" width="5" height="10" rx="1"/></svg>
+        <b>手機當鏡頭</b><small>在這台電腦顯示角色，手機負責拍</small></button>
+      <button data-src="file" class="choice" role="radio">
+        <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M10 11v6l5-3z"/></svg>
+        <b>影片檔</b><small>用錄好的影片驅動角色</small></button>
+    </div>
+
+    <div class="step"><span class="num">2</span><b>動捕範圍</b></div>
+    <div class="seg wide" id="startMode" role="radiogroup">
+      <button data-mode="upper" class="on">上半身<small>坐在鏡頭前約 1 公尺</small></button>
+      <button data-mode="full">全身<small>退到 2～3 公尺，全身入鏡</small></button>
+    </div>
+
+    <div id="facingRow">
+      <div class="step"><span class="num">3</span><b>用哪個鏡頭</b></div>
+      <div class="seg wide" id="startFacing">
+        <button data-facing="user" class="on">前鏡頭<small>看得到自己</small></button>
+        <button data-facing="environment">後鏡頭<small>畫質較好</small></button>
+      </div>
+    </div>
+
+    <button class="btn primary big" id="btnGo">開始</button>
+    <p class="status" id="startStatus" aria-live="polite"></p>
+    <p class="fine">影像只在你的裝置上計算，不會上傳。第一次使用需下載約 15～25MB 的 AI 模型。</p>
+  </div>
+</div>
+
+<!-- ============ 電腦端：等待手機配對 ============ -->
+<div id="pairHost" class="overlay hidden">
+  <div class="card pair-card">
+    <h2>用手機掃描連線</h2>
+    <div class="pair-grid">
+      <div id="qr" class="qr" aria-label="配對 QR code"></div>
+      <div>
+        <p>1. 手機開相機掃左邊的 QR code<br>　 （或用手機瀏覽器開啟下方網址並輸入配對碼）</p>
+        <p class="url" id="pairUrl"></p>
+        <p>2. 配對碼</p>
+        <div class="code" id="pairCode">------</div>
+        <p>3. 手機按「開始傳送」，橫放立好</p>
+      </div>
+    </div>
+    <p class="status" id="pairStatus" aria-live="polite">等待手機連線…</p>
+    <button class="btn ghost" id="btnPairCancel">取消</button>
+  </div>
+</div>
+
+<!-- ============ 手機端：鏡頭模式 ============ -->
+<div id="camMode" class="overlay hidden">
+  <video id="camSend" playsinline muted autoplay></video>
+  <div class="cam-ui">
+    <div class="card cam-card">
+      <h2>手機鏡頭模式</h2>
+      <label class="field">電腦上顯示的配對碼
+        <input id="camCode" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="6 位數字" autocomplete="off"></label>
+      <div class="seg wide" id="camFacing">
+        <button data-facing="user">前鏡頭</button><button data-facing="environment" class="on">後鏡頭（畫質較好）</button>
+      </div>
+      <button class="btn primary big" id="btnCamGo">開始傳送</button>
+      <p class="status" id="camStatus" aria-live="polite"></p>
+      <p class="fine">傳送時請保持這個畫面開著、不要鎖定螢幕。</p>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status"></div>
+<input type="file" id="fileVrm" accept=".vrm,model/gltf-binary" hidden>
+<input type="file" id="fileVideo" accept="video/*" hidden>
+<input type="file" id="fileBg" accept="image/*" hidden>
+
+<script type="module" src="js/main.js?v=__BUILD_VERSION__"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+Mocap Avatar
+Copyright (c) 2026 Tedus Chen
+
+This work is licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0).
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+The motion-capture approach is adapted from XR Animator
+(https://github.com/ButzYung/SystemAnimatorOnline) by ButzYung,
+licensed under CC BY-NC-SA 4.0.
+
+Third-party components keep their own licenses:
+- vendor/three/            three.js            MIT
+- vendor/three-vrm.*       @pixiv/three-vrm    MIT
+- vendor/peerjs.min.js     PeerJS              MIT
+- vendor/qrcode.mjs        qrcode-generator    MIT
+- assets/models/*.vrm      see README.md (CC0 / VRM Public License 1.0)

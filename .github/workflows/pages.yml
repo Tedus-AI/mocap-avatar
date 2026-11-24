@@ -1,0 +1,43 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build site and stamp version
+        run: |
+          mkdir -p _site
+          cp -r index.html css js vendor assets _site/
+          V="$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}"
+          # 版本號只由 CI 蓋上，原始碼裡永遠是 __BUILD_VERSION__
+          sed -i "s/__BUILD_VERSION__/${V}/g" _site/index.html _site/js/*.js
+          echo "{\"version\":\"${V}\"}" > _site/version.json
+          grep -q "${V}" _site/index.html
+          grep -q "${V}" _site/js/main.js
+          ! grep -rl "__BUILD_VERSION__" _site/index.html _site/js
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
