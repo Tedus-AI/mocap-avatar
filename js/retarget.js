@@ -257,7 +257,8 @@ export class Rig {
         if (!ok && opts.fullBody && nowL - (this.lastSeen[av + "Leg"] ?? -9) < this.HOLD) {
           this._keep([av + "UpperLeg", av + "LowerLeg", av + "Foot"], hipsW, W);
         } else if (ok) {
-          const { thigh, shin } = this._legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, frame.aspect || 1.333);
+          const camZ = this.sem(calQ ? V(0, 0, 1).applyQuaternion(calQ) : V(0, 0, 1)).normalize();
+          const { thigh, shin } = this._legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, frame.aspect || 1.333, camZ);
           aimBone(av + "UpperLeg", hipsW, thigh);
           aimBone(av + "LowerLeg", W[av + "UpperLeg"], shin);
           if (vis(iFt) > 0.4) aimBone(av + "Foot", W[av + "LowerLeg"], V().subVectors(cv(w[iFt]), cv(w[iAn])));
@@ -307,12 +308,13 @@ export class Rig {
   }
 
   /** 腿的方向：抑制深度雜訊＋關節限制
-   *  1. 前後（深度）分量只取 70%：單鏡頭的深度最不準
+   *  1. 鏡頭深度方向的分量只取 70%：單鏡頭的深度最不準（側身時深度＝身體左右，不是前後）
    *  2. 畫面上腿是直的、且大腿沒有明顯縮短（不是正面深蹲）→ 視為直腿
-   *  3. 膝蓋不能往前彎（反關節）→ 拉直 */
-  _legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, aspect) {
+   *  3. 膝蓋不能往前彎（反關節）→ 拉直；「前」以大腿本身的朝向為準（彎腰、伏地時臀部是轉的） */
+  _legDirs(pose, w, cv, iHip, iKn, iAn, hipsW, aspect, camZ) {
     const fwd = this.sem(V(0, 0, 1)).applyQuaternion(hipsW).normalize();
-    const damp = (v) => v.sub(fwd.clone().multiplyScalar(v.dot(fwd) * 0.3));
+    const dz = camZ || fwd;
+    const damp = (v) => v.sub(dz.clone().multiplyScalar(v.dot(dz) * 0.3));
     const thigh = damp(V().subVectors(cv(w[iKn]), cv(w[iHip])));
     let shin = damp(V().subVectors(cv(w[iAn]), cv(w[iKn])));
     const lm = pose.lm, H = lm[iHip], K = lm[iKn], A = lm[iAn];
@@ -330,7 +332,9 @@ export class Rig {
     }
     // 反關節：小腿相對大腿往身體前方彎 → 拉直
     const tn = thigh.clone().normalize(), sn = shin.clone().normalize();
-    if (sn.clone().sub(tn).dot(fwd) > 0.05) shin = tn.multiplyScalar(shin.length());
+    const down = this.sem(V(0, -1, 0)).applyQuaternion(hipsW).normalize();
+    const thighFwd = fwd.clone().applyQuaternion(Q().setFromUnitVectors(down, tn));   // 跟著大腿抬起而轉的「前方」
+    if (sn.clone().sub(tn).dot(thighFwd) > 0.05) shin = tn.multiplyScalar(shin.length());
     return { thigh, shin };
   }
 
